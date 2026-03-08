@@ -1,7 +1,8 @@
 # PXE Boot Server on Alpine Linux
 
-A automated setup script to configure a PXE boot server on Alpine Linux.  
-DHCP is handled externally by an OPNsense router — this server provides **TFTP** (boot files) and **HTTP** (ISO serving) only.
+An automated setup script to configure a PXE boot server on Alpine Linux.  
+DHCP is handled externally by an OPNsense router — this server provides **TFTP** (boot files) and **HTTP** (ISO serving) only.  
+Supports both **BIOS** (syslinux/pxelinux) and **UEFI** (grub-efi) clients.
 
 ---
 
@@ -10,15 +11,22 @@ DHCP is handled externally by an OPNsense router — this server provides **TFTP
 ```
 Client PC (PXE boot)
        │
-       ▼
-OPNsense Router (DHCP)
-  → sends IP + Next Server = Alpine IP
-  → sends boot filename = pxelinux.0
-       │
-       ▼
-Alpine Linux PXE Server
-  ├── dnsmasq  (TFTP)  :69   → serves pxelinux.0 + boot menu
-  └── nginx    (HTTP)  :80   → serves ISO file
+       ├── BIOS client ──────────────────────────┐
+       └── UEFI client ──────────────────────────┤
+                                                  ▼
+                                    OPNsense Router (DHCP)
+                                      → IP address
+                                      → Next Server = Alpine IP
+                                      → BIOS boot file  = pxelinux.0
+                                      → UEFI boot file  = efi64/bootx64.efi
+                                                  │
+                                                  ▼
+                                    Alpine Linux PXE Server
+                                      ├── dnsmasq  (TFTP) :69
+                                      │     ├── pxelinux.0       (BIOS)
+                                      │     └── efi64/bootx64.efi (UEFI)
+                                      └── nginx    (HTTP) :80
+                                            └── /iso/boot.iso
 ```
 
 ---
@@ -37,7 +45,6 @@ Alpine Linux PXE Server
 If you haven't already, set a static IP on Alpine:
 
 ```bash
-# Edit the network interface config
 vi /etc/network/interfaces
 ```
 
@@ -61,7 +68,7 @@ service networking restart
 
 ## 2. Configure the Script
 
-Edit the variables at the top of `setupnetboot.sh` before running:
+Edit the variables at the top of [`setupnetboot.sh`](setupnetboot.sh) before running:
 
 ```bash
 ALPINE_IP="192.168.1.10"                    # Static IP of this Alpine server
@@ -79,17 +86,15 @@ ISO_NAME="boot.iso"                         # Filename to save the ISO as
 Transfer the script to your Alpine machine and run it as root:
 
 ```bash
-# Make it executable
 chmod +x setupnetboot.sh
-
-# Run as root
 ./setupnetboot.sh
 ```
 
 The script will automatically:
 
-- Install `dnsmasq`, `syslinux`, `nginx`, `wget`
-- Configure TFTP to serve PXE boot files
+- Install `dnsmasq`, `syslinux`, `grub-efi`, `nginx`, `wget`
+- Configure TFTP to serve **BIOS** (`pxelinux.0`) and **UEFI** (`bootx64.efi`) boot files
+- Build a standalone GRUB EFI image for UEFI clients
 - Configure Nginx to serve the ISO over HTTP
 - Download the ISO (if `ISO_URL` is set)
 - Enable and start all services
@@ -107,6 +112,10 @@ In your OPNsense router, navigate to:
 | Enable Network Booting | ✅ Checked |
 | Next Server | `192.168.1.10` *(your Alpine IP)* |
 | Default BIOS filename | `pxelinux.0` |
+| Default UEFI filename | `efi64/bootx64.efi` |
+
+> **How it works:** dnsmasq on the Alpine server detects the client architecture via DHCP option 93.  
+> UEFI clients (arch `7` or `9`) receive `efi64/bootx64.efi`; all others receive `pxelinux.0`.
 
 Save and apply the changes.
 
@@ -117,7 +126,9 @@ Save and apply the changes.
 1. On the client PC, enter the BIOS/UEFI settings
 2. Set **Network/PXE Boot** as the first boot device
 3. Save and reboot
-4. The client will receive DHCP from OPNsense, then load the PXE menu from Alpine
+4. The client will receive DHCP from OPNsense, then load the appropriate bootloader from Alpine:
+   - **BIOS** → syslinux menu → Boot ISO via memdisk
+   - **UEFI** → GRUB menu → Boot ISO
 5. Select **"Boot from ISO"** in the menu
 
 ---
@@ -128,35 +139,48 @@ After setup, the server will have the following layout:
 
 ```
 /srv/
-├── tftp/                    # TFTP root (served by dnsmasq)
-│   ├── pxelinux.0           # BIOS PXE bootloader
+├── tftp/                        # TFTP root (served by dnsmasq)
+│   ├── pxelinux.0               # BIOS PXE bootloader (syslinux)
+│   ├── bootx64.efi              # UEFI bootloader copy (root level)
 │   ├── ldlinux.c32
 │   ├── libcom32.c32
 │   ├── libutil.c32
 │   ├── menu.c32
 │   ├── vesamenu.c32
-│   └── pxelinux.cfg/
-│       └── default          # Boot menu configuration
-└── http/                    # HTTP root (served by nginx)
+│   ├── pxelinux.cfg/
+│   │   └── default              # BIOS boot menu (syslinux)
+│   └── efi64/
+│       ├── bootx64.efi          # UEFI GRUB EFI image
+│       └── grub/
+│           └── grub.cfg         # UEFI GRUB boot menu
+└── http/                        # HTTP root (served by nginx)
     └── iso/
-        └── boot.iso         # Your ISO file
+        └── boot.iso             # Your ISO file
 ```
 
 ---
 
 ## Troubleshooting
 
-### Client doesn't get PXE boot offer
+### Client doesn't receive a PXE boot offer
 - Verify OPNsense **Network Booting** is enabled and pointing to the correct Alpine IP
-- Confirm the Alpine server's firewall allows UDP port `69` (TFTP) and TCP port `80` (HTTP)
+- Confirm both BIOS and UEFI filenames are set in OPNsense
+- Check the Alpine server firewall allows UDP `69` (TFTP) and TCP `80` (HTTP)
 
 ### TFTP times out
 ```bash
 # Check dnsmasq is running
 rc-service dnsmasq status
 
-# Check logs
+# Watch live TFTP requests
 tail -f /var/log/messages
+```
+
+### UEFI client gets wrong bootloader
+```bash
+# Verify dnsmasq is matching client architecture correctly
+# Look for "client-arch" in logs
+grep -i "arch\|efi\|pxe" /var/log/messages
 ```
 
 ### ISO not found / HTTP 404
@@ -181,6 +205,8 @@ rc-service nginx restart
 
 ## Notes
 
-- **UEFI boot** is not configured by default. UEFI clients require additional EFI bootloaders (e.g., from `grub-efi`).
-- Booting via `memdisk` loads the entire ISO into RAM. This works best for **small ISOs** (rescue tools, memtest, etc.). For large OS installers, consider extracting the `kernel` + `initrd` from the ISO directly.
-- The script uses `set -e`, so it will stop on any error. Check the output carefully
+- **BIOS clients** use `syslinux/memdisk` to load the ISO entirely into RAM — best for **small ISOs**.
+- **UEFI clients** use `grub-efi` which offers better compatibility with modern hardware.
+- For **large OS installer ISOs**, consider extracting the `kernel` + `initrd` from the ISO and booting those directly instead of using memdisk.
+- The script uses `set -e` and will stop on any error — check the output carefully if it fails.
+- UEFI Secure Boot is **not supported** — you may need to disable Secure Boot in the client's firmware settings.

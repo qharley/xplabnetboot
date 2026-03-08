@@ -4,9 +4,9 @@ set -e
 # ─────────────────────────────────────────────
 # Configuration – edit these before running
 # ─────────────────────────────────────────────
-ALPINE_IP="192.168.1.10"          # IP of this Alpine PXE server
-ISO_URL="https://example.com/your.iso"   # URL to download the ISO (or leave blank to copy manually)
-ISO_NAME="boot.iso"               # Filename for the ISO
+ALPINE_IP="192.168.1.10"                  # IP of this Alpine PXE server
+ISO_URL="https://example.com/your.iso"    # URL to download the ISO (or leave blank to copy manually)
+ISO_NAME="boot.iso"                       # Filename for the ISO
 TFTP_ROOT="/srv/tftp"
 HTTP_ROOT="/srv/http"
 ISO_DIR="${HTTP_ROOT}/iso"
@@ -16,16 +16,17 @@ ISO_DIR="${HTTP_ROOT}/iso"
 # ─────────────────────────────────────────────
 echo "==> Updating apk and installing packages..."
 apk update
-apk add dnsmasq syslinux nginx wget curl bash
+apk add dnsmasq syslinux nginx wget curl bash grub grub-efi
 
 # ─────────────────────────────────────────────
 # Set up TFTP directory structure
 # ─────────────────────────────────────────────
 echo "==> Setting up TFTP root at ${TFTP_ROOT}..."
 mkdir -p "${TFTP_ROOT}/pxelinux.cfg"
-mkdir -p "${TFTP_ROOT}/efi64"
+mkdir -p "${TFTP_ROOT}/efi64/grub"
 
-# Copy PXE bootloaders from syslinux
+# Copy BIOS PXE bootloaders from syslinux
+echo "==> Copying BIOS syslinux bootloaders..."
 cp /usr/share/syslinux/pxelinux.0       "${TFTP_ROOT}/"
 cp /usr/share/syslinux/ldlinux.c32      "${TFTP_ROOT}/"
 cp /usr/share/syslinux/libcom32.c32     "${TFTP_ROOT}/"
@@ -34,9 +35,43 @@ cp /usr/share/syslinux/menu.c32         "${TFTP_ROOT}/"
 cp /usr/share/syslinux/vesamenu.c32     "${TFTP_ROOT}/" 2>/dev/null || true
 
 # ─────────────────────────────────────────────
-# Create PXE boot menu (BIOS)
+# Set up UEFI GRUB bootloader
 # ─────────────────────────────────────────────
-echo "==> Creating PXE boot menu..."
+echo "==> Setting up UEFI GRUB bootloader..."
+
+# Build a standalone GRUB EFI image that includes the TFTP fetch config
+grub-mkimage \
+    --format=x86_64-efi \
+    --output="${TFTP_ROOT}/efi64/bootx64.efi" \
+    --prefix="(tftp,${ALPINE_IP})/efi64/grub" \
+    efinet tftp boot linux linuxefi normal configfile part_gpt \
+    part_msdos fat iso9660 udf ext2 xfs btrfs squash4 \
+    gzio all_video video_bochs video_cirrus \
+    echo test true regexp probe
+
+# Create GRUB config for UEFI clients
+cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
+set timeout=10
+set default=0
+
+menuentry "Boot from ISO (${ISO_NAME})" {
+    echo "Loading ISO via HTTP..."
+    linuxefi /vmlinuz root=/dev/ram0 ip=dhcp
+    initrdefi /initrd.img
+}
+
+menuentry "Boot from Local Disk" {
+    exit
+}
+EOF
+
+# Also place bootx64.efi at the root for simpler DHCP filename config
+cp "${TFTP_ROOT}/efi64/bootx64.efi" "${TFTP_ROOT}/bootx64.efi"
+
+# ─────────────────────────────────────────────
+# Create PXE boot menu (BIOS / syslinux)
+# ─────────────────────────────────────────────
+echo "==> Creating BIOS PXE boot menu..."
 cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
 PROMPT 0
@@ -55,6 +90,7 @@ EOF
 
 # ─────────────────────────────────────────────
 # Configure dnsmasq (TFTP only, no DHCP)
+# Serves both BIOS (pxelinux.0) and UEFI (bootx64.efi) clients
 # ─────────────────────────────────────────────
 echo "==> Configuring dnsmasq for TFTP-only mode..."
 cat > /etc/dnsmasq.conf <<EOF
@@ -65,8 +101,14 @@ port=0
 enable-tftp
 tftp-root=${TFTP_ROOT}
 
-# PXE boot file for BIOS clients
-dhcp-boot=pxelinux.0,,${ALPINE_IP}
+# PXE boot – detect client architecture and serve correct bootloader
+# Tag UEFI x86-64 clients (client arch 7 = EFI BC, 9 = EFI x86-64)
+dhcp-match=set:efi-x86_64,option:client-arch,9
+dhcp-match=set:efi-x86_64,option:client-arch,7
+
+# Serve correct bootloader based on client type
+dhcp-boot=tag:efi-x86_64,efi64/bootx64.efi,,${ALPINE_IP}
+dhcp-boot=tag:!efi-x86_64,pxelinux.0,,${ALPINE_IP}
 
 # Log TFTP requests
 log-dhcp
@@ -119,7 +161,7 @@ rc-service dnsmasq restart
 rc-service nginx restart
 
 # ─────────────────────────────────────────────
-# OPNsense reminder
+# Summary
 # ─────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════"
@@ -132,7 +174,12 @@ echo ""
 echo " OPNsense DHCP configuration required:"
 echo "   Services → DHCPv4 → [Your Interface]"
 echo "   → Network Booting:"
-echo "     Enable          : ✔"
-echo "     Next Server     : ${ALPINE_IP}"
-echo "     Default BIOS    : pxelinux.0"
+echo "     Enable           : ✔"
+echo "     Next Server      : ${ALPINE_IP}"
+echo "     Default BIOS     : pxelinux.0"
+echo "     Default UEFI     : efi64/bootx64.efi"
+echo ""
+echo " Client boot files:"
+echo "   BIOS clients  → pxelinux.0      (syslinux)"
+echo "   UEFI clients  → efi64/bootx64.efi (grub-efi)"
 echo ""
