@@ -94,7 +94,7 @@ The script will automatically:
 
 - Install `dnsmasq`, `syslinux`, `grub-efi`, `nginx`, `wget`
 - Configure TFTP to serve **BIOS** (`pxelinux.0`) and **UEFI** (`bootx64.efi`) boot files
-- Build a standalone GRUB EFI image for UEFI clients
+- Build a standalone GRUB EFI image for UEFI clients (with fallback handling)
 - Configure Nginx to serve the ISO over HTTP
 - Download the ISO (if `ISO_URL` is set)
 - Enable and start all services
@@ -125,11 +125,12 @@ Save and apply the changes.
 
 1. On the client PC, enter the BIOS/UEFI settings
 2. Set **Network/PXE Boot** as the first boot device
-3. Save and reboot
-4. The client will receive DHCP from OPNsense, then load the appropriate bootloader from Alpine:
+3. **For UEFI clients:** Disable **Secure Boot** (our GRUB image is not signed)
+4. Save and reboot
+5. The client will receive DHCP from OPNsense, then load the appropriate bootloader from Alpine:
    - **BIOS** → syslinux menu → Boot ISO via memdisk
-   - **UEFI** → GRUB menu → Boot ISO
-5. Select **"Boot from ISO"** in the menu
+   - **UEFI** → GRUB menu → Boot ISO via memdisk
+6. Select **"Boot from ISO"** in the menu
 
 ---
 
@@ -142,6 +143,7 @@ After setup, the server will have the following layout:
 ├── tftp/                        # TFTP root (served by dnsmasq)
 │   ├── pxelinux.0               # BIOS PXE bootloader (syslinux)
 │   ├── bootx64.efi              # UEFI bootloader copy (root level)
+│   ├── memdisk                  # Memory disk loader
 │   ├── ldlinux.c32
 │   ├── libcom32.c32
 │   ├── libutil.c32
@@ -167,6 +169,17 @@ After setup, the server will have the following layout:
 - Confirm both BIOS and UEFI filenames are set in OPNsense
 - Check the Alpine server firewall allows UDP `69` (TFTP) and TCP `80` (HTTP)
 
+### GRUB EFI build fails
+If you see `grub-mkimage: error: cannot open '/usr/lib/grub/x86_64-efi/linuxefi.mod'`:
+
+```bash
+# Check available GRUB modules
+ls /usr/lib/grub/x86_64-efi/
+
+# The script will automatically fall back to using existing EFI files
+# BIOS boot will still work normally
+```
+
 ### TFTP times out
 ```bash
 # Check dnsmasq is running
@@ -174,13 +187,23 @@ rc-service dnsmasq status
 
 # Watch live TFTP requests
 tail -f /var/log/messages
+
+# Test TFTP manually
+apk add tftp-hpa
+tftp 192.168.1.10
+> get pxelinux.0
+> quit
 ```
 
-### UEFI client gets wrong bootloader
+### UEFI client gets wrong bootloader or hangs
 ```bash
 # Verify dnsmasq is matching client architecture correctly
-# Look for "client-arch" in logs
 grep -i "arch\|efi\|pxe" /var/log/messages
+
+# Check if UEFI bootloader exists
+ls -la /srv/tftp/efi64/bootx64.efi
+
+# Disable Secure Boot on the client if enabled
 ```
 
 ### ISO not found / HTTP 404
@@ -188,12 +211,26 @@ grep -i "arch\|efi\|pxe" /var/log/messages
 # Check nginx is running
 rc-service nginx status
 
-# Verify the ISO exists
+# Verify the ISO exists and is readable
 ls -lh /srv/http/iso/
 
 # Test HTTP access from another machine
 curl -I http://192.168.1.10/iso/boot.iso
 ```
+
+### Large ISO takes too long to boot
+For ISOs larger than 1GB, consider these alternatives:
+
+```bash
+# Extract kernel and initrd from the ISO instead of using memdisk
+mkdir /mnt/iso
+mount -o loop /srv/http/iso/boot.iso /mnt/iso
+cp /mnt/iso/casper/vmlinuz /srv/tftp/
+cp /mnt/iso/casper/initrd /srv/tftp/
+umount /mnt/iso
+```
+
+Then update the boot menu to use direct kernel/initrd loading instead of memdisk.
 
 ### Restart services manually
 ```bash
@@ -205,8 +242,9 @@ rc-service nginx restart
 
 ## Notes
 
-- **BIOS clients** use `syslinux/memdisk` to load the ISO entirely into RAM — best for **small ISOs**.
-- **UEFI clients** use `grub-efi` which offers better compatibility with modern hardware.
-- For **large OS installer ISOs**, consider extracting the `kernel` + `initrd` from the ISO and booting those directly instead of using memdisk.
+- **Both BIOS and UEFI clients** use `memdisk` to load the ISO entirely into RAM — best for **ISOs under 2GB**.
+- **UEFI Secure Boot is not supported** — you must disable Secure Boot in client firmware settings.
+- For **large OS installer ISOs** (>2GB), extract the kernel/initrd and boot directly instead of using memdisk.
+- The script includes fallback handling if GRUB EFI modules are incompatible.
 - The script uses `set -e` and will stop on any error — check the output carefully if it fails.
-- UEFI Secure Boot is **not supported** — you may need to disable Secure Boot in the client's firmware settings.
+- Both bootloaders serve identical functionality; the choice depends on client firmware (BIOS vs UEFI).

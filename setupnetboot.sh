@@ -33,21 +33,40 @@ cp /usr/share/syslinux/libcom32.c32     "${TFTP_ROOT}/"
 cp /usr/share/syslinux/libutil.c32      "${TFTP_ROOT}/"
 cp /usr/share/syslinux/menu.c32         "${TFTP_ROOT}/"
 cp /usr/share/syslinux/vesamenu.c32     "${TFTP_ROOT}/" 2>/dev/null || true
+cp /usr/share/syslinux/memdisk          "${TFTP_ROOT}/"
 
 # ─────────────────────────────────────────────
 # Set up UEFI GRUB bootloader
 # ─────────────────────────────────────────────
 echo "==> Setting up UEFI GRUB bootloader..."
 
-# Build a standalone GRUB EFI image that includes the TFTP fetch config
-grub-mkimage \
-    --format=x86_64-efi \
-    --output="${TFTP_ROOT}/efi64/bootx64.efi" \
-    --prefix="(tftp,${ALPINE_IP})/efi64/grub" \
-    efinet tftp boot linux linuxefi normal configfile part_gpt \
-    part_msdos fat iso9660 udf ext2 xfs btrfs squash4 \
-    gzio all_video video_bochs video_cirrus \
-    echo test true regexp probe
+# Check what modules are available and build with compatible ones
+GRUB_MODULES_DIR="/usr/lib/grub/x86_64-efi"
+if [ -d "$GRUB_MODULES_DIR" ]; then
+    # Use standard linux module instead of linuxefi for Alpine
+    echo "==> Building GRUB EFI image with available modules..."
+    grub-mkimage \
+        --format=x86_64-efi \
+        --output="${TFTP_ROOT}/efi64/bootx64.efi" \
+        --prefix="(tftp,${ALPINE_IP})/efi64/grub" \
+        efinet tftp boot linux normal configfile part_gpt \
+        part_msdos fat iso9660 udf ext2 xfs btrfs squash4 \
+        gzio all_video video_bochs video_cirrus \
+        echo test true regexp probe chain halt reboot \
+        search search_fs_file search_fs_uuid search_label \
+        minicmd cat ls help
+else
+    echo "WARNING: GRUB EFI modules not found. Trying alternative approach..."
+    # Use pre-built EFI file if available
+    if [ -f "/usr/lib/grub/x86_64-efi-signed/grubx64.efi" ]; then
+        cp "/usr/lib/grub/x86_64-efi-signed/grubx64.efi" "${TFTP_ROOT}/efi64/bootx64.efi"
+    elif [ -f "/boot/efi/EFI/alpine/grubx64.efi" ]; then
+        cp "/boot/efi/EFI/alpine/grubx64.efi" "${TFTP_ROOT}/efi64/bootx64.efi"
+    else
+        echo "ERROR: No GRUB EFI bootloader found. UEFI boot will not work."
+        echo "BIOS boot will still function normally."
+    fi
+fi
 
 # Create GRUB config for UEFI clients
 cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
@@ -55,18 +74,31 @@ set timeout=10
 set default=0
 
 menuentry "Boot from ISO (${ISO_NAME})" {
-    echo "Loading ISO via HTTP..."
-    linuxefi /vmlinuz root=/dev/ram0 ip=dhcp
-    initrdefi /initrd.img
+    echo "Loading ISO via HTTP memdisk..."
+    echo "Note: This may take time depending on ISO size and network speed"
+    linux16 /memdisk iso
+    initrd16 /iso/${ISO_NAME}
 }
 
 menuentry "Boot from Local Disk" {
-    exit
+    echo "Attempting to boot from local disk..."
+    set root=(hd0)
+    chainloader +1
+}
+
+menuentry "Reboot" {
+    reboot
+}
+
+menuentry "Shutdown" {
+    halt
 }
 EOF
 
 # Also place bootx64.efi at the root for simpler DHCP filename config
-cp "${TFTP_ROOT}/efi64/bootx64.efi" "${TFTP_ROOT}/bootx64.efi"
+if [ -f "${TFTP_ROOT}/efi64/bootx64.efi" ]; then
+    cp "${TFTP_ROOT}/efi64/bootx64.efi" "${TFTP_ROOT}/bootx64.efi"
+fi
 
 # ─────────────────────────────────────────────
 # Create PXE boot menu (BIOS / syslinux)
@@ -76,7 +108,7 @@ cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
 PROMPT 0
 TIMEOUT 100
-MENU TITLE PXE Boot Menu
+MENU TITLE PXE Boot Menu (BIOS)
 
 LABEL bootiso
   MENU LABEL Boot from ISO (${ISO_NAME})
@@ -86,6 +118,14 @@ LABEL bootiso
 LABEL local
   MENU LABEL Boot from Local Disk
   LOCALBOOT 0
+
+LABEL reboot
+  MENU LABEL Reboot
+  COM32 reboot.c32
+
+LABEL poweroff
+  MENU LABEL Power Off
+  COM32 poweroff.c32
 EOF
 
 # ─────────────────────────────────────────────
@@ -105,12 +145,14 @@ tftp-root=${TFTP_ROOT}
 # Tag UEFI x86-64 clients (client arch 7 = EFI BC, 9 = EFI x86-64)
 dhcp-match=set:efi-x86_64,option:client-arch,9
 dhcp-match=set:efi-x86_64,option:client-arch,7
+dhcp-match=set:efi-bc,option:client-arch,7
 
 # Serve correct bootloader based on client type
 dhcp-boot=tag:efi-x86_64,efi64/bootx64.efi,,${ALPINE_IP}
-dhcp-boot=tag:!efi-x86_64,pxelinux.0,,${ALPINE_IP}
+dhcp-boot=tag:efi-bc,efi64/bootx64.efi,,${ALPINE_IP}
+dhcp-boot=tag:!efi-x86_64,tag:!efi-bc,pxelinux.0,,${ALPINE_IP}
 
-# Log TFTP requests
+# Log TFTP requests for debugging
 log-dhcp
 log-queries
 EOF
@@ -129,10 +171,22 @@ server {
     root ${HTTP_ROOT};
     autoindex on;
 
+    # Serve ISOs with proper caching and chunked transfer
     location /iso/ {
         alias ${ISO_DIR}/;
         sendfile on;
         tcp_nopush on;
+        tcp_nodelay on;
+        
+        # Allow large files and range requests for better download reliability
+        client_max_body_size 4G;
+        add_header Accept-Ranges bytes;
+    }
+    
+    # Serve other TFTP files via HTTP as fallback
+    location /tftp/ {
+        alias ${TFTP_ROOT}/;
+        autoindex on;
     }
 }
 EOF
@@ -143,7 +197,7 @@ rm -f /etc/nginx/http.d/default.conf
 # ─────────────────────────────────────────────
 # Download or remind user to place the ISO
 # ─────────────────────────────────────────────
-if [ -n "${ISO_URL}" ]; then
+if [ -n "${ISO_URL}" ] && [ "${ISO_URL}" != "https://example.com/your.iso" ]; then
     echo "==> Downloading ISO from ${ISO_URL}..."
     wget -O "${ISO_DIR}/${ISO_NAME}" "${ISO_URL}"
 else
@@ -180,6 +234,14 @@ echo "     Default BIOS     : pxelinux.0"
 echo "     Default UEFI     : efi64/bootx64.efi"
 echo ""
 echo " Client boot files:"
-echo "   BIOS clients  → pxelinux.0      (syslinux)"
+echo "   BIOS clients  → pxelinux.0        (syslinux + memdisk)"
 echo "   UEFI clients  → efi64/bootx64.efi (grub-efi)"
+echo ""
+echo " Test TFTP access:"
+echo "   tftp ${ALPINE_IP}"
+echo "   > get pxelinux.0"
+echo "   > get efi64/bootx64.efi"
+echo ""
+echo " Test HTTP access:"
+echo "   curl -I http://${ALPINE_IP}/iso/${ISO_NAME}"
 echo ""
