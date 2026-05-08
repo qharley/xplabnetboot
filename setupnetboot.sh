@@ -208,8 +208,22 @@ rm -f /etc/nginx/http.d/default.conf
 # Download or remind user to place the ISO
 # ─────────────────────────────────────────────
 if [ -n "${ISO_URL}" ] && [ "${ISO_URL}" != "https://example.com/your.iso" ]; then
-    echo "==> Downloading ISO from ${ISO_URL}..."
-    wget -O "${ISO_DIR}/${ISO_NAME}" "${ISO_URL}"
+    if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
+        echo "==> ISO already exists: ${ISO_DIR}/${ISO_NAME}"
+        read -r -p "    Download again and overwrite? [y/N] " _iso_reply
+        case "${_iso_reply}" in
+            [yY][eE][sS]|[yY])
+                echo "==> Re-downloading ISO from ${ISO_URL}..."
+                wget -O "${ISO_DIR}/${ISO_NAME}" "${ISO_URL}"
+                ;;
+            *)
+                echo "==> Keeping existing ISO."
+                ;;
+        esac
+    else
+        echo "==> Downloading ISO from ${ISO_URL}..."
+        wget -O "${ISO_DIR}/${ISO_NAME}" "${ISO_URL}"
+    fi
 else
     echo "==> Please copy your ISO to: ${ISO_DIR}/${ISO_NAME}"
 fi
