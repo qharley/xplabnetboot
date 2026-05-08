@@ -9,7 +9,9 @@ ISO_URL="https://example.com/your.iso"    # URL to download the ISO (or leave bl
 ISO_NAME="boot.iso"                       # Filename for the ISO
 TFTP_ROOT="/srv/tftp"
 HTTP_ROOT="/srv/http"
-ISO_DIR="${HTTP_ROOT}/iso"
+# ISO is stored under TFTP root so memdisk (BIOS) can fetch it via TFTP,
+# and nginx exposes the same directory over HTTP for UEFI / GRUB loopback.
+ISO_DIR="${TFTP_ROOT}/iso"
 
 # ─────────────────────────────────────────────
 # Install required packages
@@ -24,6 +26,7 @@ apk add dnsmasq syslinux nginx wget curl bash grub grub-efi
 echo "==> Setting up TFTP root at ${TFTP_ROOT}..."
 mkdir -p "${TFTP_ROOT}/pxelinux.cfg"
 mkdir -p "${TFTP_ROOT}/efi64/grub"
+mkdir -p "${ISO_DIR}"
 
 # Copy BIOS PXE bootloaders from syslinux
 # NOTE: lpxelinux.0 is the HTTP/FTP-enabled PXELINUX variant (built with lwIP).
@@ -134,8 +137,8 @@ MENU TITLE PXE Boot Menu (BIOS)
 LABEL bootiso
   MENU LABEL Boot from ISO (${ISO_NAME})
   KERNEL memdisk
-  INITRD http://${ALPINE_IP}/iso/${ISO_NAME}
-  APPEND iso
+  INITRD iso/${ISO_NAME}
+  APPEND iso raw
 
 LABEL local
   MENU LABEL Boot from Local Disk
@@ -175,7 +178,6 @@ EOF
 # ─────────────────────────────────────────────
 echo "==> Configuring nginx..."
 mkdir -p "${ISO_DIR}"
-
 cat > /etc/nginx/http.d/pxe.conf <<EOF
 server {
     listen 80;
