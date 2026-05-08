@@ -54,7 +54,7 @@ if [ -d "$GRUB_MODULES_DIR" ]; then
         gzio all_video video_bochs video_cirrus \
         echo test true regexp probe chain halt reboot \
         search search_fs_file search_fs_uuid search_label \
-        minicmd cat ls help
+        minicmd cat ls help loopback
 else
     echo "WARNING: GRUB EFI modules not found. Trying alternative approach..."
     # Use pre-built EFI file if available
@@ -74,10 +74,20 @@ set timeout=10
 set default=0
 
 menuentry "Boot from ISO (${ISO_NAME})" {
-    echo "Loading ISO via HTTP memdisk..."
-    echo "Note: This may take time depending on ISO size and network speed"
-    linux16 /memdisk iso
-    initrd16 /iso/${ISO_NAME}
+    echo "Mounting ISO via loopback (UEFI)..."
+    loopback loop (tftp,${ALPINE_IP})/iso/${ISO_NAME}
+    # Try the ISO's own GRUB config first (works for most modern Linux ISOs)
+    if [ -f (loop)/boot/grub/grub.cfg ]; then
+        configfile (loop)/boot/grub/grub.cfg
+    elif [ -f (loop)/EFI/BOOT/grub.cfg ]; then
+        configfile (loop)/EFI/BOOT/grub.cfg
+    else
+        # Fallback: load kernel and initrd directly
+        # Adjust these paths to match the layout inside your specific ISO
+        echo "No grub.cfg found in ISO – attempting direct kernel load..."
+        linux (loop)/boot/vmlinuz boot=casper quiet splash ---
+        initrd (loop)/boot/initrd.lz
+    fi
 }
 
 menuentry "Boot from Local Disk" {
