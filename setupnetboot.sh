@@ -49,7 +49,7 @@ if [ -d "$GRUB_MODULES_DIR" ]; then
         --format=x86_64-efi \
         --output="${TFTP_ROOT}/efi64/bootx64.efi" \
         --prefix="(tftp,${ALPINE_IP})/efi64/grub" \
-        efinet tftp boot linux normal configfile part_gpt \
+        efinet tftp http net boot linux normal configfile part_gpt \
         part_msdos fat iso9660 udf ext2 xfs btrfs squash4 \
         gzio all_video video_bochs video_cirrus \
         echo test true regexp probe chain halt reboot \
@@ -75,7 +75,7 @@ set default=0
 
 menuentry "Boot from ISO (${ISO_NAME})" {
     echo "Mounting ISO via loopback (UEFI)..."
-    loopback loop (tftp,${ALPINE_IP})/iso/${ISO_NAME}
+    loopback loop (http,${ALPINE_IP})/iso/${ISO_NAME}
     # Try the ISO's own GRUB config first (works for most modern Linux ISOs)
     if [ -f (loop)/boot/grub/grub.cfg ]; then
         configfile (loop)/boot/grub/grub.cfg
