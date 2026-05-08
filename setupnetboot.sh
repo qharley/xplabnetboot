@@ -26,14 +26,24 @@ mkdir -p "${TFTP_ROOT}/pxelinux.cfg"
 mkdir -p "${TFTP_ROOT}/efi64/grub"
 
 # Copy BIOS PXE bootloaders from syslinux
+# NOTE: lpxelinux.0 is the HTTP/FTP-enabled PXELINUX variant (built with lwIP).
+# It is required because we load the ISO from HTTP via the INITRD directive.
+# We copy it to TFTP under the name pxelinux.0 so existing DHCP configs keep working.
 echo "==> Copying BIOS syslinux bootloaders..."
-cp /usr/share/syslinux/pxelinux.0       "${TFTP_ROOT}/"
+if [ -f /usr/share/syslinux/lpxelinux.0 ]; then
+    cp /usr/share/syslinux/lpxelinux.0  "${TFTP_ROOT}/pxelinux.0"
+else
+    echo "WARNING: lpxelinux.0 not found – falling back to pxelinux.0 (HTTP boot will NOT work)."
+    cp /usr/share/syslinux/pxelinux.0   "${TFTP_ROOT}/pxelinux.0"
+fi
 cp /usr/share/syslinux/ldlinux.c32      "${TFTP_ROOT}/"
 cp /usr/share/syslinux/libcom32.c32     "${TFTP_ROOT}/"
 cp /usr/share/syslinux/libutil.c32      "${TFTP_ROOT}/"
 cp /usr/share/syslinux/menu.c32         "${TFTP_ROOT}/"
 cp /usr/share/syslinux/vesamenu.c32     "${TFTP_ROOT}/" 2>/dev/null || true
 cp /usr/share/syslinux/memdisk          "${TFTP_ROOT}/"
+cp /usr/share/syslinux/reboot.c32       "${TFTP_ROOT}/" 2>/dev/null || true
+cp /usr/share/syslinux/poweroff.c32     "${TFTP_ROOT}/" 2>/dev/null || true
 
 # ─────────────────────────────────────────────
 # Set up UEFI GRUB bootloader
@@ -82,11 +92,12 @@ menuentry "Boot from ISO (${ISO_NAME})" {
     elif [ -f (loop)/EFI/BOOT/grub.cfg ]; then
         configfile (loop)/EFI/BOOT/grub.cfg
     else
-        # Fallback: load kernel and initrd directly
-        # Adjust these paths to match the layout inside your specific ISO
-        echo "No grub.cfg found in ISO – attempting direct kernel load..."
-        linux (loop)/boot/vmlinuz boot=casper quiet splash ---
-        initrd (loop)/boot/initrd.lz
+        # Fallback: no embedded grub.cfg – we cannot reliably guess kernel paths
+        # for an arbitrary ISO. Drop to GRUB shell so the user can investigate.
+        echo "ERROR: No grub.cfg found inside the ISO."
+        echo "Use the GRUB shell ('ls (loop)/' etc.) to inspect the ISO layout,"
+        echo "then customize this menuentry with the correct linux/initrd paths."
+        sleep 10
     fi
 }
 
@@ -123,7 +134,8 @@ MENU TITLE PXE Boot Menu (BIOS)
 LABEL bootiso
   MENU LABEL Boot from ISO (${ISO_NAME})
   KERNEL memdisk
-  APPEND iso initrd=http://${ALPINE_IP}/iso/${ISO_NAME}
+  INITRD http://${ALPINE_IP}/iso/${ISO_NAME}
+  APPEND iso
 
 LABEL local
   MENU LABEL Boot from Local Disk
@@ -140,7 +152,10 @@ EOF
 
 # ─────────────────────────────────────────────
 # Configure dnsmasq (TFTP only, no DHCP)
-# Serves both BIOS (pxelinux.0) and UEFI (bootx64.efi) clients
+# DHCP (incl. arch-based filename selection) is handled by OPNsense.
+# OPNsense must be configured to serve:
+#   client-arch 0       (BIOS)        → pxelinux.0
+#   client-arch 7 or 9  (UEFI x86_64) → efi64/bootx64.efi
 # ─────────────────────────────────────────────
 echo "==> Configuring dnsmasq for TFTP-only mode..."
 cat > /etc/dnsmasq.conf <<EOF
@@ -151,19 +166,7 @@ port=0
 enable-tftp
 tftp-root=${TFTP_ROOT}
 
-# PXE boot – detect client architecture and serve correct bootloader
-# Tag UEFI x86-64 clients (client arch 7 = EFI BC, 9 = EFI x86-64)
-dhcp-match=set:efi-x86_64,option:client-arch,9
-dhcp-match=set:efi-x86_64,option:client-arch,7
-dhcp-match=set:efi-bc,option:client-arch,7
-
-# Serve correct bootloader based on client type
-dhcp-boot=tag:efi-x86_64,efi64/bootx64.efi,,${ALPINE_IP}
-dhcp-boot=tag:efi-bc,efi64/bootx64.efi,,${ALPINE_IP}
-dhcp-boot=tag:!efi-x86_64,tag:!efi-bc,pxelinux.0,,${ALPINE_IP}
-
 # Log TFTP requests for debugging
-log-dhcp
 log-queries
 EOF
 
