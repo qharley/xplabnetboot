@@ -283,18 +283,26 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
         else xorriso -indev "${ISO_DIR}/${ISO_NAME}" -find "/$1" >/dev/null 2>&1; fi
     }
 
-    if probe "live/vmlinuz" || probe "live/vmlinuz1"; then
+    if probe "live/vmlinuz" || probe "live/vmlinuz1" || probe "live/vmlinuz2" || probe "live/vmlinuz-amd64"; then
         # Debian Live / Clonezilla / Tails / Kali live ISOs
         DISTRO="debian-live"
         if probe "live/vmlinuz"; then
             iso_extract "live/vmlinuz"   "${ISO_BOOT_DIR}/vmlinuz" || true
-        else
+        elif probe "live/vmlinuz1"; then
             iso_extract "live/vmlinuz1"  "${ISO_BOOT_DIR}/vmlinuz" || true
+        elif probe "live/vmlinuz2"; then
+            iso_extract "live/vmlinuz2"  "${ISO_BOOT_DIR}/vmlinuz" || true
+        else
+            iso_extract "live/vmlinuz-amd64"  "${ISO_BOOT_DIR}/vmlinuz" || true
         fi
         if probe "live/initrd.img"; then
             iso_extract "live/initrd.img"  "${ISO_BOOT_DIR}/initrd" || true
         elif probe "live/initrd1.img"; then
             iso_extract "live/initrd1.img" "${ISO_BOOT_DIR}/initrd" || true
+        elif probe "live/initrd2.img"; then
+            iso_extract "live/initrd2.img" "${ISO_BOOT_DIR}/initrd" || true
+        elif probe "live/initrd-amd64.img"; then
+            iso_extract "live/initrd-amd64.img" "${ISO_BOOT_DIR}/initrd" || true
         else
             iso_extract "live/initrd"      "${ISO_BOOT_DIR}/initrd" || true
         fi
@@ -400,22 +408,44 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
 fi
 
 # ─────────────────────────────────────────────
-# Regenerate BIOS PXE menu with the real ISO entry (if extraction succeeded)
+# Regenerate BIOS PXE menu with ISO entry
 # ─────────────────────────────────────────────
+echo "==> Writing final BIOS PXE boot menu..."
+
+BOOTISO_ENTRY=""
 if [ -n "${KERNEL_REL}" ]; then
-    echo "==> Writing final BIOS PXE boot menu..."
-    cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
+        BOOTISO_ENTRY=$(cat <<EOF
+LABEL bootiso
+    MENU LABEL Boot ${DISTRO} (${ISO_NAME})
+    MENU DEFAULT
+    KERNEL ${KERNEL_REL}
+    INITRD ${INITRD_REL}
+    APPEND ${EXTRA_CMDLINE}
+
+EOF
+)
+elif [ -f "${HTTP_ROOT}/iso-contents/live/vmlinuz" ] && [ -f "${HTTP_ROOT}/iso-contents/live/initrd.img" ]; then
+        # Fallback for Debian Live / Clonezilla when extraction failed for any reason.
+        # lpxelinux.0 can fetch kernel/initrd directly via HTTP.
+        DISTRO="debian-live-http-fallback"
+        BOOTISO_ENTRY=$(cat <<EOF
+LABEL bootiso
+    MENU LABEL Boot Clonezilla Live (${ISO_NAME})
+    MENU DEFAULT
+    KERNEL http://${ALPINE_IP}/iso-contents/live/vmlinuz
+    APPEND initrd=http://${ALPINE_IP}/iso-contents/live/initrd.img boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet
+
+EOF
+)
+fi
+
+cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
 PROMPT 0
 TIMEOUT 100
 MENU TITLE PXE Boot Menu (BIOS) – ${DISTRO}
 
-LABEL bootiso
-  MENU LABEL Boot ${DISTRO} (${ISO_NAME})
-  MENU DEFAULT
-  KERNEL ${KERNEL_REL}
-  INITRD ${INITRD_REL}
-  APPEND ${EXTRA_CMDLINE}
+${BOOTISO_ENTRY}
 
 LABEL local
   MENU LABEL Boot from Local Disk
@@ -430,6 +460,12 @@ LABEL poweroff
   COM32 poweroff.c32
 EOF
 
+if [ -z "${BOOTISO_ENTRY}" ]; then
+        echo "WARNING: No ISO boot entry was generated."
+        echo "  Verify ISO exists at ${ISO_DIR}/${ISO_NAME} and contains live/vmlinuz + live/initrd*."
+fi
+
+if [ -n "${KERNEL_REL}" ]; then
     echo "==> Adding ISO entry to UEFI GRUB menu..."
     cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
 set timeout=10
