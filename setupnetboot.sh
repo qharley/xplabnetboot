@@ -76,17 +76,12 @@ else
     fi
 fi
 
-# Create GRUB config for UEFI clients
+# Create placeholder GRUB config for UEFI clients.
+# The real menu entry for the ISO is appended later, after extraction, when
+# we know the correct kernel/initrd path and command line for the detected distro.
 cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
 set timeout=10
 set default=0
-
-menuentry "Boot from ISO (${ISO_NAME})" {
-    echo "Loading ISO via HTTP memdisk..."
-    echo "Note: This may take time depending on ISO size and network speed"
-    linux16 /memdisk iso
-    initrd16 /iso/${ISO_NAME}
-}
 
 menuentry "Boot from Local Disk" {
     echo "Attempting to boot from local disk..."
@@ -110,18 +105,17 @@ fi
 
 # ─────────────────────────────────────────────
 # Create PXE boot menu (BIOS / syslinux)
+# This is regenerated later, after the ISO has been downloaded and inspected,
+# so the entry uses the correct kernel/initrd path and command line for the
+# detected distro. The initial version below is just a placeholder that lets
+# the menu render even if ISO extraction fails.
 # ─────────────────────────────────────────────
-echo "==> Creating BIOS PXE boot menu..."
+echo "==> Creating placeholder BIOS PXE boot menu..."
 cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
 PROMPT 0
 TIMEOUT 100
 MENU TITLE PXE Boot Menu (BIOS)
-
-LABEL bootiso
-  MENU LABEL Boot from ISO (${ISO_NAME})
-  KERNEL memdisk
-  APPEND iso initrd=http://${ALPINE_IP}/iso/${ISO_NAME}
 
 LABEL local
   MENU LABEL Boot from Local Disk
@@ -225,6 +219,177 @@ if [ -n "${ISO_URL}" ] && [ "${ISO_URL}" != "https://example.com/your.iso" ]; th
     fi
 else
     echo "==> Please copy your ISO to: ${ISO_DIR}/${ISO_NAME}"
+fi
+
+# ─────────────────────────────────────────────
+# Extract kernel + initrd from the ISO and generate proper boot menu entries.
+#
+# memdisk-based ISO booting does NOT work for modern Linux installers/live
+# images – the BIOS hands off to memdisk, the kernel cannot find a real block
+# device, and the machine resets (the "endless loop" symptom).
+#
+# Instead we loop-mount the ISO, copy its kernel + initrd to the TFTP root,
+# and generate an APPEND line with the right cmdline so the installer/live
+# system fetches the rest of the ISO from our HTTP server.
+# ─────────────────────────────────────────────
+ISO_BOOT_DIR="${TFTP_ROOT}/iso-boot"
+mkdir -p "${ISO_BOOT_DIR}"
+
+DISTRO=""
+KERNEL_REL=""
+INITRD_REL=""
+EXTRA_CMDLINE=""
+
+if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
+    echo "==> Inspecting ISO to extract kernel and initrd..."
+    apk add --quiet xorriso 2>/dev/null || true
+    MNT="$(mktemp -d)"
+    MOUNTED=0
+    if mount -o loop,ro "${ISO_DIR}/${ISO_NAME}" "${MNT}" 2>/dev/null; then
+        MOUNTED=1
+    else
+        echo "    Loop mount unavailable; falling back to xorriso extraction."
+    fi
+
+    # Helper: copy a file out of the ISO (whether mounted or via xorriso)
+    iso_extract() {
+        src="$1"; dst="$2"
+        if [ "${MOUNTED}" = "1" ]; then
+            if [ -f "${MNT}/${src}" ]; then cp "${MNT}/${src}" "${dst}"; return 0; fi
+            return 1
+        else
+            xorriso -osirrox on -indev "${ISO_DIR}/${ISO_NAME}" \
+                -extract "/${src}" "${dst}" >/dev/null 2>&1
+            [ -s "${dst}" ]
+        fi
+    }
+
+    # Detect distro family by probing for well-known files inside the ISO
+    probe() {
+        if [ "${MOUNTED}" = "1" ]; then [ -e "${MNT}/$1" ]
+        else xorriso -indev "${ISO_DIR}/${ISO_NAME}" -find "/$1" >/dev/null 2>&1; fi
+    }
+
+    if probe "casper/vmlinuz"; then
+        # Ubuntu / Linux Mint / Pop!_OS live ISOs
+        DISTRO="ubuntu-casper"
+        iso_extract "casper/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
+        iso_extract "casper/initrd"  "${ISO_BOOT_DIR}/initrd"  || \
+            iso_extract "casper/initrd.lz" "${ISO_BOOT_DIR}/initrd" || true
+        KERNEL_REL="iso-boot/vmlinuz"
+        INITRD_REL="iso-boot/initrd"
+        EXTRA_CMDLINE="boot=casper netboot=url url=http://${ALPINE_IP}/iso/${ISO_NAME} ip=dhcp ---"
+    elif probe "install.amd/vmlinuz" || probe "install/vmlinuz"; then
+        # Debian installer
+        DISTRO="debian-installer"
+        if probe "install.amd/vmlinuz"; then
+            iso_extract "install.amd/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
+            iso_extract "install.amd/initrd.gz" "${ISO_BOOT_DIR}/initrd" || true
+        else
+            iso_extract "install/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
+            iso_extract "install/initrd.gz" "${ISO_BOOT_DIR}/initrd" || true
+        fi
+        KERNEL_REL="iso-boot/vmlinuz"
+        INITRD_REL="iso-boot/initrd"
+        EXTRA_CMDLINE="auto=true priority=critical url=http://${ALPINE_IP}/preseed.cfg --- quiet"
+    elif probe "images/pxeboot/vmlinuz"; then
+        # Fedora / RHEL / CentOS / Rocky / Alma (Anaconda)
+        DISTRO="anaconda"
+        iso_extract "images/pxeboot/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
+        iso_extract "images/pxeboot/initrd.img" "${ISO_BOOT_DIR}/initrd" || true
+        KERNEL_REL="iso-boot/vmlinuz"
+        INITRD_REL="iso-boot/initrd"
+        EXTRA_CMDLINE="inst.repo=http://${ALPINE_IP}/iso/ inst.stage2=hd:LABEL=$(blkid -s LABEL -o value "${ISO_DIR}/${ISO_NAME}" 2>/dev/null || echo CDROM)"
+    elif probe "boot/vmlinuz-lts" || probe "boot/vmlinuz-virt"; then
+        # Alpine
+        DISTRO="alpine"
+        if probe "boot/vmlinuz-lts"; then
+            iso_extract "boot/vmlinuz-lts" "${ISO_BOOT_DIR}/vmlinuz" || true
+            iso_extract "boot/initramfs-lts" "${ISO_BOOT_DIR}/initrd" || true
+        else
+            iso_extract "boot/vmlinuz-virt" "${ISO_BOOT_DIR}/vmlinuz" || true
+            iso_extract "boot/initramfs-virt" "${ISO_BOOT_DIR}/initrd" || true
+        fi
+        KERNEL_REL="iso-boot/vmlinuz"
+        INITRD_REL="iso-boot/initrd"
+        EXTRA_CMDLINE="modules=loop,squashfs,sd-mod,usb-storage alpine_repo=http://${ALPINE_IP}/iso/apks modloop=http://${ALPINE_IP}/iso/boot/modloop-lts"
+    elif probe "arch/boot/x86_64/vmlinuz-linux"; then
+        # Arch Linux
+        DISTRO="arch"
+        iso_extract "arch/boot/x86_64/vmlinuz-linux" "${ISO_BOOT_DIR}/vmlinuz" || true
+        iso_extract "arch/boot/x86_64/initramfs-linux.img" "${ISO_BOOT_DIR}/initrd" || true
+        KERNEL_REL="iso-boot/vmlinuz"
+        INITRD_REL="iso-boot/initrd"
+        ARCHISO_LABEL="$(blkid -s LABEL -o value "${ISO_DIR}/${ISO_NAME}" 2>/dev/null || echo ARCH_$(date +%Y%m))"
+        EXTRA_CMDLINE="archisobasedir=arch archiso_http_srv=http://${ALPINE_IP}/iso/ archisolabel=${ARCHISO_LABEL} ip=:::::eth0:dhcp"
+    else
+        echo "    WARNING: Could not auto-detect distro family inside ISO."
+        echo "    Please add a kernel + initrd manually and edit pxelinux.cfg/default."
+    fi
+
+    [ "${MOUNTED}" = "1" ] && umount "${MNT}" 2>/dev/null || true
+    rmdir "${MNT}" 2>/dev/null || true
+
+    if [ -n "${KERNEL_REL}" ] && [ -s "${TFTP_ROOT}/${KERNEL_REL}" ] && [ -s "${TFTP_ROOT}/${INITRD_REL}" ]; then
+        echo "    Detected distro family: ${DISTRO}"
+        echo "    Kernel : ${TFTP_ROOT}/${KERNEL_REL}"
+        echo "    Initrd : ${TFTP_ROOT}/${INITRD_REL}"
+    else
+        echo "    WARNING: kernel/initrd extraction failed; ISO entry will not be added."
+        KERNEL_REL=""
+    fi
+fi
+
+# ─────────────────────────────────────────────
+# Regenerate BIOS PXE menu with the real ISO entry (if extraction succeeded)
+# ─────────────────────────────────────────────
+if [ -n "${KERNEL_REL}" ]; then
+    echo "==> Writing final BIOS PXE boot menu..."
+    cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
+UI menu.c32
+PROMPT 0
+TIMEOUT 100
+MENU TITLE PXE Boot Menu (BIOS) – ${DISTRO}
+
+LABEL bootiso
+  MENU LABEL Boot ${DISTRO} (${ISO_NAME})
+  MENU DEFAULT
+  KERNEL ${KERNEL_REL}
+  INITRD ${INITRD_REL}
+  APPEND ${EXTRA_CMDLINE}
+
+LABEL local
+  MENU LABEL Boot from Local Disk
+  LOCALBOOT 0
+
+LABEL reboot
+  MENU LABEL Reboot
+  COM32 reboot.c32
+
+LABEL poweroff
+  MENU LABEL Power Off
+  COM32 poweroff.c32
+EOF
+
+    echo "==> Adding ISO entry to UEFI GRUB menu..."
+    cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
+set timeout=10
+set default=0
+
+menuentry "Boot ${DISTRO} (${ISO_NAME})" {
+    echo "Loading kernel and initrd over TFTP..."
+    linux  /${KERNEL_REL} ${EXTRA_CMDLINE}
+    initrd /${INITRD_REL}
+}
+
+menuentry "Boot from Local Disk" {
+    set root=(hd0)
+    chainloader +1
+}
+
+menuentry "Reboot" { reboot }
+menuentry "Shutdown" { halt }
+EOF
 fi
 
 # ─────────────────────────────────────────────
