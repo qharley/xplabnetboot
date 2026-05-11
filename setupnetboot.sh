@@ -184,6 +184,19 @@ server {
         # Allow large files and range requests for better download reliability
         client_max_body_size 4G;
         add_header Accept-Ranges bytes;
+        autoindex on;
+    }
+
+    # Serve the loop-mounted ISO contents (squashfs, etc.) for live-boot fetch=
+    # The ISO is mounted at ${HTTP_ROOT}/iso-contents after download/extraction.
+    location /iso-contents/ {
+        alias ${HTTP_ROOT}/iso-contents/;
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        client_max_body_size 4G;
+        add_header Accept-Ranges bytes;
+        autoindex on;
     }
     
     # Serve other TFTP files via HTTP as fallback
@@ -270,7 +283,27 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
         else xorriso -indev "${ISO_DIR}/${ISO_NAME}" -find "/$1" >/dev/null 2>&1; fi
     }
 
-    if probe "casper/vmlinuz"; then
+    if probe "live/vmlinuz" || probe "live/vmlinuz1"; then
+        # Debian Live / Clonezilla / Tails / Kali live ISOs
+        DISTRO="debian-live"
+        if probe "live/vmlinuz"; then
+            iso_extract "live/vmlinuz"   "${ISO_BOOT_DIR}/vmlinuz" || true
+        else
+            iso_extract "live/vmlinuz1"  "${ISO_BOOT_DIR}/vmlinuz" || true
+        fi
+        if probe "live/initrd.img"; then
+            iso_extract "live/initrd.img"  "${ISO_BOOT_DIR}/initrd" || true
+        elif probe "live/initrd1.img"; then
+            iso_extract "live/initrd1.img" "${ISO_BOOT_DIR}/initrd" || true
+        else
+            iso_extract "live/initrd"      "${ISO_BOOT_DIR}/initrd" || true
+        fi
+        # fetch= URL is finalised later, after the persistent loop-mount attempt.
+        # Set a provisional value here; it will be overwritten if mount succeeds.
+        KERNEL_REL="iso-boot/vmlinuz"
+        INITRD_REL="iso-boot/initrd"
+        EXTRA_CMDLINE="boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet"
+    elif probe "casper/vmlinuz"; then
         # Ubuntu / Linux Mint / Pop!_OS live ISOs
         DISTRO="ubuntu-casper"
         iso_extract "casper/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
@@ -329,6 +362,32 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
 
     [ "${MOUNTED}" = "1" ] && umount "${MNT}" 2>/dev/null || true
     rmdir "${MNT}" 2>/dev/null || true
+
+    # For Debian Live (Clonezilla etc.) the client fetches the squashfs directly
+    # from the server via HTTP. The ISO must therefore be loop-mounted persistently
+    # so its internal directory tree (live/filesystem.squashfs, etc.) is visible
+    # under a web-accessible path.
+    if [ "${DISTRO}" = "debian-live" ]; then
+        ISO_CONTENTS="${HTTP_ROOT}/iso-contents"
+        mkdir -p "${ISO_CONTENTS}"
+        # Unmount first in case a previous run left a stale mount
+        umount "${ISO_CONTENTS}" 2>/dev/null || true
+        if mount -o loop,ro "${ISO_DIR}/${ISO_NAME}" "${ISO_CONTENTS}"; then
+            echo "    ISO loop-mounted at ${ISO_CONTENTS} (served as /iso-contents/)"
+            # Update fetch= URL to point at the persistent mount instead of the
+            # plain /iso/ dir (which only has the .iso file, not its contents).
+            EXTRA_CMDLINE="boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet"
+        else
+            echo "    WARNING: Could not loop-mount ISO. The 'fetch=' URL may fail."
+            echo "    Manually run: mount -o loop,ro ${ISO_DIR}/${ISO_NAME} ${ISO_CONTENTS}"
+        fi
+        # Ensure the mount survives reboots via /etc/fstab
+        FSTAB_ENTRY="${ISO_DIR}/${ISO_NAME}  ${ISO_CONTENTS}  iso9660  loop,ro  0 0"
+        if ! grep -qF "${ISO_DIR}/${ISO_NAME}" /etc/fstab; then
+            echo "${FSTAB_ENTRY}" >> /etc/fstab
+            echo "    Added fstab entry for persistent ISO loop-mount."
+        fi
+    fi
 
     if [ -n "${KERNEL_REL}" ] && [ -s "${TFTP_ROOT}/${KERNEL_REL}" ] && [ -s "${TFTP_ROOT}/${INITRD_REL}" ]; then
         echo "    Detected distro family: ${DISTRO}"
