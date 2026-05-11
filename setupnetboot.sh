@@ -67,7 +67,7 @@ if [ -d "$GRUB_MODULES_DIR" ]; then
         gzio all_video video_bochs video_cirrus \
         echo test true regexp probe chain halt reboot \
         search search_fs_file search_fs_uuid search_label \
-        minicmd cat ls help loopback
+        minicmd cat ls help loopback sleep
 else
     echo "WARNING: GRUB EFI modules not found. Trying alternative approach..."
     # Use pre-built EFI file if available
@@ -88,6 +88,10 @@ set default=0
 
 menuentry "Boot from ISO (${ISO_NAME})" {
     echo "Mounting ISO via loopback (UEFI)..."
+    # Detach any pre-existing loop device so we can re-enter this entry cleanly.
+    # GRUB doesn't abort on non-zero return inside a menuentry, so an error
+    # here (when 'loop' doesn't exist yet) is harmless.
+    loopback -d loop
     loopback loop (http,${ALPINE_IP})/iso/${ISO_NAME}
     # Try the ISO's own GRUB config first (works for most modern Linux ISOs)
     if [ -f (loop)/boot/grub/grub.cfg ]; then
