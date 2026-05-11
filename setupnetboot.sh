@@ -26,13 +26,21 @@ mkdir -p "${TFTP_ROOT}/pxelinux.cfg"
 mkdir -p "${TFTP_ROOT}/efi64/grub"
 
 # Copy BIOS PXE bootloaders from syslinux
+# NOTE: lpxelinux.0 is used (in addition to pxelinux.0) because it supports
+# HTTP/FTP in addition to TFTP. The standard pxelinux.0 can only fetch files
+# over TFTP, so APPEND lines referring to http://... URLs silently fail and
+# the PXE menu loops. DHCP serves lpxelinux.0 by default below.
 echo "==> Copying BIOS syslinux bootloaders..."
 cp /usr/share/syslinux/pxelinux.0       "${TFTP_ROOT}/"
+cp /usr/share/syslinux/lpxelinux.0      "${TFTP_ROOT}/" 2>/dev/null || \
+    echo "WARNING: lpxelinux.0 not found – HTTP fetch from BIOS PXE will not work."
 cp /usr/share/syslinux/ldlinux.c32      "${TFTP_ROOT}/"
 cp /usr/share/syslinux/libcom32.c32     "${TFTP_ROOT}/"
 cp /usr/share/syslinux/libutil.c32      "${TFTP_ROOT}/"
 cp /usr/share/syslinux/menu.c32         "${TFTP_ROOT}/"
 cp /usr/share/syslinux/vesamenu.c32     "${TFTP_ROOT}/" 2>/dev/null || true
+cp /usr/share/syslinux/reboot.c32       "${TFTP_ROOT}/" 2>/dev/null || true
+cp /usr/share/syslinux/poweroff.c32     "${TFTP_ROOT}/" 2>/dev/null || true
 cp /usr/share/syslinux/memdisk          "${TFTP_ROOT}/"
 
 # ─────────────────────────────────────────────
@@ -150,7 +158,8 @@ dhcp-match=set:efi-bc,option:client-arch,7
 # Serve correct bootloader based on client type
 dhcp-boot=tag:efi-x86_64,efi64/bootx64.efi,,${ALPINE_IP}
 dhcp-boot=tag:efi-bc,efi64/bootx64.efi,,${ALPINE_IP}
-dhcp-boot=tag:!efi-x86_64,tag:!efi-bc,pxelinux.0,,${ALPINE_IP}
+# Use lpxelinux.0 so BIOS clients can fetch HTTP URLs (memdisk + ISO over HTTP).
+dhcp-boot=tag:!efi-x86_64,tag:!efi-bc,lpxelinux.0,,${ALPINE_IP}
 
 # Log TFTP requests for debugging
 log-dhcp
@@ -244,11 +253,11 @@ echo "   Services → DHCPv4 → [Your Interface]"
 echo "   → Network Booting:"
 echo "     Enable           : ✔"
 echo "     Next Server      : ${ALPINE_IP}"
-echo "     Default BIOS     : pxelinux.0"
+echo "     Default BIOS     : lpxelinux.0   (HTTP-capable syslinux)"
 echo "     Default UEFI     : efi64/bootx64.efi"
 echo ""
 echo " Client boot files:"
-echo "   BIOS clients  → pxelinux.0        (syslinux + memdisk)"
+echo "   BIOS clients  → lpxelinux.0       (syslinux w/ HTTP + memdisk)"
 echo "   UEFI clients  → efi64/bootx64.efi (grub-efi)"
 echo ""
 echo " Test TFTP access:"
