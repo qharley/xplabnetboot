@@ -234,6 +234,22 @@ else
     echo "==> Please copy your ISO to: ${ISO_DIR}/${ISO_NAME}"
 fi
 
+# If the configured ISO filename does not exist, try to auto-detect one in ISO_DIR.
+# This avoids ending up with menus that have no ISO entry due to a naming mismatch.
+if [ ! -f "${ISO_DIR}/${ISO_NAME}" ]; then
+    ISO_CANDIDATES="$(find "${ISO_DIR}" -maxdepth 1 -type f -name '*.iso' 2>/dev/null || true)"
+    ISO_COUNT="$(printf '%s\n' "${ISO_CANDIDATES}" | sed '/^$/d' | wc -l | tr -d ' ')"
+    if [ "${ISO_COUNT}" = "1" ]; then
+        ISO_NAME="$(basename "${ISO_CANDIDATES}")"
+        echo "==> Using detected ISO file: ${ISO_NAME}"
+    elif [ "${ISO_COUNT}" -gt 1 ]; then
+        ISO_NAME="$(ls -1t "${ISO_DIR}"/*.iso 2>/dev/null | head -n1 | xargs basename)"
+        echo "==> Configured ISO not found. Using newest ISO in ${ISO_DIR}: ${ISO_NAME}"
+    else
+        echo "==> No ISO file found in ${ISO_DIR}."
+    fi
+fi
+
 # ─────────────────────────────────────────────
 # Extract kernel + initrd from the ISO and generate proper boot menu entries.
 #
@@ -407,6 +423,28 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
     fi
 fi
 
+# Recovery path: if extraction failed but the ISO contents are mounted, copy
+# Debian Live kernel/initrd candidates directly from /iso-contents/live.
+if [ -z "${KERNEL_REL}" ] && [ -d "${HTTP_ROOT}/iso-contents/live" ]; then
+    LIVE_KERNEL=""
+    LIVE_INITRD=""
+    for K in vmlinuz vmlinuz1 vmlinuz2 vmlinuz-amd64; do
+        [ -f "${HTTP_ROOT}/iso-contents/live/${K}" ] && LIVE_KERNEL="${K}" && break
+    done
+    for I in initrd.img initrd1.img initrd2.img initrd-amd64.img initrd; do
+        [ -f "${HTTP_ROOT}/iso-contents/live/${I}" ] && LIVE_INITRD="${I}" && break
+    done
+    if [ -n "${LIVE_KERNEL}" ] && [ -n "${LIVE_INITRD}" ]; then
+        cp "${HTTP_ROOT}/iso-contents/live/${LIVE_KERNEL}" "${ISO_BOOT_DIR}/vmlinuz"
+        cp "${HTTP_ROOT}/iso-contents/live/${LIVE_INITRD}" "${ISO_BOOT_DIR}/initrd"
+        DISTRO="debian-live"
+        KERNEL_REL="iso-boot/vmlinuz"
+        INITRD_REL="iso-boot/initrd"
+        EXTRA_CMDLINE="boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet"
+        echo "==> Recovered boot artifacts from /iso-contents/live (${LIVE_KERNEL}, ${LIVE_INITRD})"
+    fi
+fi
+
 # ─────────────────────────────────────────────
 # Regenerate BIOS PXE menu with ISO entry
 # ─────────────────────────────────────────────
@@ -439,6 +477,17 @@ EOF
 )
 fi
 
+if [ -z "${BOOTISO_ENTRY}" ]; then
+        # Keep an explicit menu item so users see why ISO boot is unavailable.
+        BOOTISO_ENTRY=$(cat <<EOF
+LABEL bootiso
+    MENU LABEL Boot from ISO (${ISO_NAME}) [not ready]
+    LOCALBOOT 0
+
+EOF
+)
+fi
+
 cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
 PROMPT 0
@@ -460,9 +509,9 @@ LABEL poweroff
   COM32 poweroff.c32
 EOF
 
-if [ -z "${BOOTISO_ENTRY}" ]; then
-        echo "WARNING: No ISO boot entry was generated."
-        echo "  Verify ISO exists at ${ISO_DIR}/${ISO_NAME} and contains live/vmlinuz + live/initrd*."
+if [ -z "${KERNEL_REL}" ]; then
+    echo "WARNING: Boot artifacts were not generated from ISO."
+    echo "  Verify ISO exists at ${ISO_DIR}/${ISO_NAME} and contains live/vmlinuz + live/initrd*."
 fi
 
 if [ -n "${KERNEL_REL}" ]; then
@@ -475,6 +524,25 @@ menuentry "Boot ${DISTRO} (${ISO_NAME})" {
     echo "Loading kernel and initrd over TFTP..."
     linux  /${KERNEL_REL} ${EXTRA_CMDLINE}
     initrd /${INITRD_REL}
+}
+
+menuentry "Boot from Local Disk" {
+    set root=(hd0)
+    chainloader +1
+}
+
+menuentry "Reboot" { reboot }
+menuentry "Shutdown" { halt }
+EOF
+else
+    echo "==> Writing UEFI GRUB menu with ISO placeholder..."
+    cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
+set timeout=10
+set default=0
+
+menuentry "Boot from ISO (${ISO_NAME}) [not ready]" {
+    echo "ISO boot entry was not generated."
+    echo "Check ISO path and extraction output in setup logs."
 }
 
 menuentry "Boot from Local Disk" {
