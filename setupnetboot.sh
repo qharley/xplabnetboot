@@ -293,95 +293,34 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
         fi
     }
 
-    # Detect distro family by probing for well-known files inside the ISO
-    probe() {
-        if [ "${MOUNTED}" = "1" ]; then [ -e "${MNT}/$1" ]
-        else xorriso -indev "${ISO_DIR}/${ISO_NAME}" -find "/$1" >/dev/null 2>&1; fi
-    }
+    # Assume Debian live-boot layout (Clonezilla and derivatives).
+    DISTRO="debian-live"
 
-    if probe "live/vmlinuz" || probe "live/vmlinuz1" || probe "live/vmlinuz2" || probe "live/vmlinuz-amd64"; then
-        # Debian Live / Clonezilla / Tails / Kali live ISOs
-        DISTRO="debian-live"
-        if probe "live/vmlinuz"; then
-            iso_extract "live/vmlinuz"   "${ISO_BOOT_DIR}/vmlinuz" || true
-        elif probe "live/vmlinuz1"; then
-            iso_extract "live/vmlinuz1"  "${ISO_BOOT_DIR}/vmlinuz" || true
-        elif probe "live/vmlinuz2"; then
-            iso_extract "live/vmlinuz2"  "${ISO_BOOT_DIR}/vmlinuz" || true
-        else
-            iso_extract "live/vmlinuz-amd64"  "${ISO_BOOT_DIR}/vmlinuz" || true
+    KERNEL_SRC=""
+    INITRD_SRC=""
+
+    for K in live/vmlinuz live/vmlinuz1 live/vmlinuz2 live/vmlinuz-amd64; do
+        if iso_extract "${K}" "${ISO_BOOT_DIR}/vmlinuz"; then
+            KERNEL_SRC="${K}"
+            break
         fi
-        if probe "live/initrd.img"; then
-            iso_extract "live/initrd.img"  "${ISO_BOOT_DIR}/initrd" || true
-        elif probe "live/initrd1.img"; then
-            iso_extract "live/initrd1.img" "${ISO_BOOT_DIR}/initrd" || true
-        elif probe "live/initrd2.img"; then
-            iso_extract "live/initrd2.img" "${ISO_BOOT_DIR}/initrd" || true
-        elif probe "live/initrd-amd64.img"; then
-            iso_extract "live/initrd-amd64.img" "${ISO_BOOT_DIR}/initrd" || true
-        else
-            iso_extract "live/initrd"      "${ISO_BOOT_DIR}/initrd" || true
+    done
+
+    for I in live/initrd.img live/initrd1.img live/initrd2.img live/initrd-amd64.img live/initrd; do
+        if iso_extract "${I}" "${ISO_BOOT_DIR}/initrd"; then
+            INITRD_SRC="${I}"
+            break
         fi
-        # fetch= URL is finalised later, after the persistent loop-mount attempt.
-        # Set a provisional value here; it will be overwritten if mount succeeds.
+    done
+
+    if [ -n "${KERNEL_SRC}" ] && [ -n "${INITRD_SRC}" ]; then
         KERNEL_REL="iso-boot/vmlinuz"
         INITRD_REL="iso-boot/initrd"
         EXTRA_CMDLINE="boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet"
-    elif probe "casper/vmlinuz"; then
-        # Ubuntu / Linux Mint / Pop!_OS live ISOs
-        DISTRO="ubuntu-casper"
-        iso_extract "casper/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
-        iso_extract "casper/initrd"  "${ISO_BOOT_DIR}/initrd"  || \
-            iso_extract "casper/initrd.lz" "${ISO_BOOT_DIR}/initrd" || true
-        KERNEL_REL="iso-boot/vmlinuz"
-        INITRD_REL="iso-boot/initrd"
-        EXTRA_CMDLINE="boot=casper netboot=url url=http://${ALPINE_IP}/iso/${ISO_NAME} ip=dhcp ---"
-    elif probe "install.amd/vmlinuz" || probe "install/vmlinuz"; then
-        # Debian installer
-        DISTRO="debian-installer"
-        if probe "install.amd/vmlinuz"; then
-            iso_extract "install.amd/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
-            iso_extract "install.amd/initrd.gz" "${ISO_BOOT_DIR}/initrd" || true
-        else
-            iso_extract "install/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
-            iso_extract "install/initrd.gz" "${ISO_BOOT_DIR}/initrd" || true
-        fi
-        KERNEL_REL="iso-boot/vmlinuz"
-        INITRD_REL="iso-boot/initrd"
-        EXTRA_CMDLINE="auto=true priority=critical url=http://${ALPINE_IP}/preseed.cfg --- quiet"
-    elif probe "images/pxeboot/vmlinuz"; then
-        # Fedora / RHEL / CentOS / Rocky / Alma (Anaconda)
-        DISTRO="anaconda"
-        iso_extract "images/pxeboot/vmlinuz" "${ISO_BOOT_DIR}/vmlinuz" || true
-        iso_extract "images/pxeboot/initrd.img" "${ISO_BOOT_DIR}/initrd" || true
-        KERNEL_REL="iso-boot/vmlinuz"
-        INITRD_REL="iso-boot/initrd"
-        EXTRA_CMDLINE="inst.repo=http://${ALPINE_IP}/iso/ inst.stage2=hd:LABEL=$(blkid -s LABEL -o value "${ISO_DIR}/${ISO_NAME}" 2>/dev/null || echo CDROM)"
-    elif probe "boot/vmlinuz-lts" || probe "boot/vmlinuz-virt"; then
-        # Alpine
-        DISTRO="alpine"
-        if probe "boot/vmlinuz-lts"; then
-            iso_extract "boot/vmlinuz-lts" "${ISO_BOOT_DIR}/vmlinuz" || true
-            iso_extract "boot/initramfs-lts" "${ISO_BOOT_DIR}/initrd" || true
-        else
-            iso_extract "boot/vmlinuz-virt" "${ISO_BOOT_DIR}/vmlinuz" || true
-            iso_extract "boot/initramfs-virt" "${ISO_BOOT_DIR}/initrd" || true
-        fi
-        KERNEL_REL="iso-boot/vmlinuz"
-        INITRD_REL="iso-boot/initrd"
-        EXTRA_CMDLINE="modules=loop,squashfs,sd-mod,usb-storage alpine_repo=http://${ALPINE_IP}/iso/apks modloop=http://${ALPINE_IP}/iso/boot/modloop-lts"
-    elif probe "arch/boot/x86_64/vmlinuz-linux"; then
-        # Arch Linux
-        DISTRO="arch"
-        iso_extract "arch/boot/x86_64/vmlinuz-linux" "${ISO_BOOT_DIR}/vmlinuz" || true
-        iso_extract "arch/boot/x86_64/initramfs-linux.img" "${ISO_BOOT_DIR}/initrd" || true
-        KERNEL_REL="iso-boot/vmlinuz"
-        INITRD_REL="iso-boot/initrd"
-        ARCHISO_LABEL="$(blkid -s LABEL -o value "${ISO_DIR}/${ISO_NAME}" 2>/dev/null || echo ARCH_$(date +%Y%m))"
-        EXTRA_CMDLINE="archisobasedir=arch archiso_http_srv=http://${ALPINE_IP}/iso/ archisolabel=${ARCHISO_LABEL} ip=:::::eth0:dhcp"
+        echo "    Debian live-boot kernel source: ${KERNEL_SRC}"
+        echo "    Debian live-boot initrd source: ${INITRD_SRC}"
     else
-        echo "    WARNING: Could not auto-detect distro family inside ISO."
-        echo "    Please add a kernel + initrd manually and edit pxelinux.cfg/default."
+        echo "    WARNING: Could not find Debian live-boot kernel/initrd paths in ISO."
     fi
 
     [ "${MOUNTED}" = "1" ] && umount "${MNT}" 2>/dev/null || true
