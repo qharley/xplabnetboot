@@ -268,6 +268,7 @@ DISTRO=""
 KERNEL_REL=""
 INITRD_REL=""
 EXTRA_CMDLINE=""
+LIVE_SQUASHFS_URL="http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs"
 
 if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
     echo "==> Inspecting ISO to extract kernel and initrd..."
@@ -316,7 +317,7 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
     if [ -n "${KERNEL_SRC}" ] && [ -n "${INITRD_SRC}" ]; then
         KERNEL_REL="iso-boot/vmlinuz"
         INITRD_REL="iso-boot/initrd"
-        EXTRA_CMDLINE="boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet"
+        EXTRA_CMDLINE="boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet"
         echo "    Debian live-boot kernel source: ${KERNEL_SRC}"
         echo "    Debian live-boot initrd source: ${INITRD_SRC}"
     else
@@ -337,9 +338,23 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
         umount "${ISO_CONTENTS}" 2>/dev/null || true
         if mount -o loop,ro "${ISO_DIR}/${ISO_NAME}" "${ISO_CONTENTS}"; then
             echo "    ISO loop-mounted at ${ISO_CONTENTS} (served as /iso-contents/)"
-            # Update fetch= URL to point at the persistent mount instead of the
-            # plain /iso/ dir (which only has the .iso file, not its contents).
-            EXTRA_CMDLINE="boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet"
+            # Detect the actual squashfs filename to avoid HTTP 404 on non-standard names.
+            LIVE_SQUASHFS_FILE=""
+            for S in "${ISO_CONTENTS}/live/filesystem.squashfs" ${ISO_CONTENTS}/live/*.squashfs; do
+                if [ -f "${S}"; then
+                    LIVE_SQUASHFS_FILE="$(basename "${S}")"
+                    break
+                fi
+            done
+
+            if [ -n "${LIVE_SQUASHFS_FILE}" ]; then
+                LIVE_SQUASHFS_URL="http://${ALPINE_IP}/iso-contents/live/${LIVE_SQUASHFS_FILE}"
+                echo "    Using squashfs: /iso-contents/live/${LIVE_SQUASHFS_FILE}"
+            else
+                echo "    WARNING: No *.squashfs found in ${ISO_CONTENTS}/live; using default path."
+            fi
+
+            EXTRA_CMDLINE="boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet"
         else
             echo "    WARNING: Could not loop-mount ISO. The 'fetch=' URL may fail."
             echo "    Manually run: mount -o loop,ro ${ISO_DIR}/${ISO_NAME} ${ISO_CONTENTS}"
@@ -376,10 +391,22 @@ if [ -z "${KERNEL_REL}" ] && [ -d "${HTTP_ROOT}/iso-contents/live" ]; then
     if [ -n "${LIVE_KERNEL}" ] && [ -n "${LIVE_INITRD}" ]; then
         cp "${HTTP_ROOT}/iso-contents/live/${LIVE_KERNEL}" "${ISO_BOOT_DIR}/vmlinuz"
         cp "${HTTP_ROOT}/iso-contents/live/${LIVE_INITRD}" "${ISO_BOOT_DIR}/initrd"
+
+        LIVE_SQUASHFS_FILE=""
+        for S in "${HTTP_ROOT}/iso-contents/live/filesystem.squashfs" ${HTTP_ROOT}/iso-contents/live/*.squashfs; do
+            if [ -f "${S}"; then
+                LIVE_SQUASHFS_FILE="$(basename "${S}")"
+                break
+            fi
+        done
+        if [ -n "${LIVE_SQUASHFS_FILE}" ]; then
+            LIVE_SQUASHFS_URL="http://${ALPINE_IP}/iso-contents/live/${LIVE_SQUASHFS_FILE}"
+        fi
+
         DISTRO="debian-live"
         KERNEL_REL="iso-boot/vmlinuz"
         INITRD_REL="iso-boot/initrd"
-        EXTRA_CMDLINE="boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet"
+        EXTRA_CMDLINE="boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet"
         echo "==> Recovered boot artifacts from /iso-contents/live (${LIVE_KERNEL}, ${LIVE_INITRD})"
     fi
 fi
@@ -410,7 +437,7 @@ LABEL bootiso
     MENU LABEL Boot Clonezilla Live (${ISO_NAME})
     MENU DEFAULT
     KERNEL http://${ALPINE_IP}/iso-contents/live/vmlinuz
-    APPEND initrd=http://${ALPINE_IP}/iso-contents/live/initrd.img boot=live union=overlay fetch=http://${ALPINE_IP}/iso-contents/live/filesystem.squashfs components quiet
+    APPEND initrd=http://${ALPINE_IP}/iso-contents/live/initrd.img boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
 
 EOF
 )
