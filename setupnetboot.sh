@@ -582,6 +582,14 @@ if [ -f /efi64/grub/iso-native.cfg ]; then
 menuentry "Boot Clonezilla Live (${ISO_NAME}) [UEFI Native Menu]" {
     configfile /efi64/grub/iso-native.cfg
 }
+elif [ -f /boot/grub/iso-native.cfg ]; then
+menuentry "Boot Clonezilla Live (${ISO_NAME}) [UEFI Native Menu]" {
+    configfile /boot/grub/iso-native.cfg
+}
+elif [ -f /grub/iso-native.cfg ]; then
+menuentry "Boot Clonezilla Live (${ISO_NAME}) [UEFI Native Menu]" {
+    configfile /grub/iso-native.cfg
+}
 fi
 
 menuentry "Boot from Local Disk" {
@@ -593,14 +601,16 @@ menuentry "Reboot" { reboot }
 menuentry "Shutdown" { halt }
 EOF
 
-# Bridge configs for environments where GRUB prefix resolves to /boot/grub or /grub.
+# Mirror startup and native configs for environments where GRUB prefix resolves
+# to /efi64/grub, /boot/grub, or /grub.
 mkdir -p "${TFTP_ROOT}/grub" "${TFTP_ROOT}/boot/grub"
-cat > "${TFTP_ROOT}/boot/grub/grub.cfg" <<'EOF'
-configfile /efi64/grub/grub.cfg
-EOF
-cat > "${TFTP_ROOT}/grub/grub.cfg" <<'EOF'
-configfile /efi64/grub/grub.cfg
-EOF
+cp "${ISO_GRUB_CFG}" "${TFTP_ROOT}/boot/grub/grub.cfg"
+cp "${ISO_GRUB_CFG}" "${TFTP_ROOT}/grub/grub.cfg"
+
+if [ -f "${ISO_GRUB_NATIVE}" ]; then
+    cp "${ISO_GRUB_NATIVE}" "${TFTP_ROOT}/boot/grub/iso-native.cfg"
+    cp "${ISO_GRUB_NATIVE}" "${TFTP_ROOT}/grub/iso-native.cfg"
+fi
 
 echo "==> UEFI startup menu written to ${ISO_GRUB_CFG}"
 
