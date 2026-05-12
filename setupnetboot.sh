@@ -483,7 +483,7 @@ fi
 # Always write a simple working BIOS menu as default fallback
 cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
-PROMPT 0
+PROMPT 1
 TIMEOUT 100
 MENU TITLE PXE Boot Menu
 
@@ -526,18 +526,15 @@ fi
 # Rewrite kernel/initrd paths and inject fetch= into grub.cfg.
 # Font, theme and splash paths are intentionally left unchanged;
 # they resolve automatically via TFTP from /boot/grub/ above.
-# ── UEFI: Two-stage GRUB menu ──────────────────────────
-# Stage 1: Simple PXE menu to boot the ISO
-# Stage 2: ISO's native grub.cfg menu entries (sourced if available)
+# ── UEFI: Simple working GRUB menu ──────────────────────
 ISO_GRUB_CFG="${TFTP_ROOT}/efi64/grub/grub.cfg"
 
-cat > "${ISO_GRUB_CFG}" <<'EOF'
+cat > "${ISO_GRUB_CFG}" <<EOF
 set timeout=10
 set default=0
 
-# Stage 1: Simple boot entry for PXE
-menuentry "Boot Clonezilla Live (PXE)" {
-    linux /iso-boot/vmlinuz boot=live union=overlay components fetch=__LIVE_SQUASHFS_URL__ quiet
+menuentry "Boot Clonezilla Live (${ISO_NAME})" {
+    linux /iso-boot/vmlinuz boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
     initrd /iso-boot/initrd
 }
 
@@ -546,16 +543,11 @@ menuentry "Boot from Local Disk" {
     chainloader +1
 }
 
-# Stage 2: ISO's native menu (sourced if available)
-if [ -f /boot/grub/grub.cfg ]; then
-    source /boot/grub/grub.cfg
-fi
+menuentry "Reboot" { reboot }
+menuentry "Shutdown" { halt }
 EOF
 
-# Replace placeholder with actual squashfs URL
-sed -i "s|__LIVE_SQUASHFS_URL__|${LIVE_SQUASHFS_URL}|g" "${ISO_GRUB_CFG}"
-
-echo "==> UEFI menu (two-stage: PXE + ISO native) written to ${ISO_GRUB_CFG}"
+echo "==> UEFI menu written to ${ISO_GRUB_CFG}"
 
 # ─────────────────────────────────────────────
 # Enable and start services
