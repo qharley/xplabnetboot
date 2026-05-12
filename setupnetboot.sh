@@ -478,7 +478,16 @@ if [ -n "${BIOS_MENU_CFG}" ]; then
 
     # Legacy fallback: if menu splash/background cannot be loaded,
     # force readable text colors on black and avoid broken background refs.
-    find "${CLONEZILLA_DIR}" -name "*.cfg" -exec sed -i '/^[[:space:]]*MENU[[:space:]]\+BACKGROUND[[:space:]]\+/Id' {} \;
+    find "${CLONEZILLA_DIR}" -name "*.cfg" | while read -r CFG; do
+        # BusyBox/GNU portability: strip MENU BACKGROUND lines without using
+        # sed extensions that can fail and abort the script under set -e.
+        grep -vi '^[[:space:]]*MENU[[:space:]]\+BACKGROUND[[:space:]]\+' "${CFG}" > "${CFG}.tmp" || true
+        if [ -s "${CFG}.tmp" ]; then
+            mv "${CFG}.tmp" "${CFG}"
+        else
+            rm -f "${CFG}.tmp"
+        fi
+    done
     BIOS_MENU_PATH="${CLONEZILLA_DIR}/${BIOS_MENU_CFG}"
     BIOS_TMP_CFG="$(mktemp)"
     cat > "${BIOS_TMP_CFG}" <<'EOF'
@@ -573,7 +582,7 @@ if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
     GRUB_TMP_CFG="$(mktemp)"
     cat > "${GRUB_TMP_CFG}" <<'EOF'
 set color_normal=white/black
-set color_highlight=black/light-gray
+set color_highlight=black/white
 
 EOF
     cat "${ISO_GRUB_CFG}" >> "${GRUB_TMP_CFG}"
@@ -585,7 +594,7 @@ else
 set timeout=10
 set default=0
 set color_normal=white/black
-set color_highlight=black/light-gray
+set color_highlight=black/white
 
 menuentry "Boot Clonezilla Live (${ISO_NAME})" {
     linux /iso-boot/vmlinuz boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
