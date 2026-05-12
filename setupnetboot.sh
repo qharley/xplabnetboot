@@ -476,13 +476,14 @@ if [ -n "${BIOS_MENU_CFG}" ]; then
         sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${CFG}"
     done
 
-    echo "==> Writing BIOS PXE menu to chain into ISO's syslinux menu..."
+    echo "==> Writing BIOS PXE menu to include ISO's syslinux menu..."
+    # INCLUDE pulls the Clonezilla syslinux config into pxelinux so the
+    # original menu is shown verbatim. Kernel/initrd paths and fetch= have
+    # already been rewritten in the extracted .cfg files above.
     cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
-# Chain into the ISO's own syslinux menu.
-# All kernel/initrd paths and fetch= URLs have been rewritten for PXE.
-DEFAULT clonezilla/${BIOS_MENU_CFG}
+INCLUDE clonezilla/${BIOS_MENU_CFG}
 EOF
-    echo "    BIOS menu: pxelinux.cfg/default → clonezilla/${BIOS_MENU_CFG}"
+    echo "    BIOS menu: pxelinux.cfg/default INCLUDE clonezilla/${BIOS_MENU_CFG}"
 else
     echo "    WARNING: No syslinux/isolinux .cfg found in ISO. Using generic BIOS menu."
     cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
@@ -512,32 +513,35 @@ LABEL poweroff
 EOF
 fi
 
-# ── UEFI: extract and rewrite the ISO's own grub.cfg ──────────────────
-echo "==> Extracting ISO GRUB config for UEFI..."
-ISO_GRUB_CFG="${TFTP_ROOT}/efi64/grub/grub.cfg"
-EXTRACTED_GRUB="$(mktemp)"
-
+# ── UEFI: extract the full /boot/grub/ tree from the ISO ──────────────
+# Clonezilla's grub.cfg references fonts, themes and splash images with
+# absolute paths like /boot/grub/unicode.pf2 and /boot/grub/themes/...
+# GRUB resolves those absolute paths from the TFTP root, so we extract
+# the entire /boot/grub/ directory to ${TFTP_ROOT}/boot/grub/ so every
+# asset is reachable without touching any path inside grub.cfg.
+echo "==> Extracting ISO /boot/grub/ tree for UEFI (fonts, themes, splash)..."
+mkdir -p "${TFTP_ROOT}/boot/grub"
 if xorriso -osirrox on -indev "${ISO_DIR}/${ISO_NAME}" \
-    -extract /boot/grub/grub.cfg "${EXTRACTED_GRUB}" >/dev/null 2>&1 \
-    && [ -s "${EXTRACTED_GRUB}" ]; then
+    -extract /boot/grub "${TFTP_ROOT}/boot/grub" >/dev/null 2>&1; then
+    echo "    Extracted /boot/grub/ → ${TFTP_ROOT}/boot/grub/"
+else
+    echo "    WARNING: Could not extract /boot/grub/ from ISO (non-fatal)."
+fi
 
-    echo "    Extracted /boot/grub/grub.cfg from ISO"
-    # Rewrite paths:
-    #   linux /live/vmlinuz* → linux /iso-boot/vmlinuz
-    #   initrd /live/initrd* → initrd /iso-boot/initrd
-    #   Add fetch= to linux lines containing boot=live
+# Rewrite kernel/initrd paths and inject fetch= into grub.cfg.
+# Font, theme and splash paths are intentionally left unchanged;
+# they resolve automatically via TFTP from /boot/grub/ above.
+ISO_GRUB_CFG="${TFTP_ROOT}/efi64/grub/grub.cfg"
+if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
     sed \
         -e 's|linux[[:space:]]*/live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
         -e 's|linux[[:space:]]*live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
         -e 's|initrd[[:space:]]*/live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         -e 's|initrd[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
-        "${EXTRACTED_GRUB}" > "${ISO_GRUB_CFG}"
-    # Add fetch= to linux lines that have boot=live but no fetch= yet
+        "${TFTP_ROOT}/boot/grub/grub.cfg" > "${ISO_GRUB_CFG}"
     sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
-    rm -f "${EXTRACTED_GRUB}"
-    echo "    UEFI menu: using rewritten ISO grub.cfg"
+    echo "    UEFI menu: ISO grub.cfg rewritten → ${ISO_GRUB_CFG}"
 else
-    rm -f "${EXTRACTED_GRUB}"
     echo "    No grub.cfg found in ISO. Writing generic UEFI menu."
     cat > "${ISO_GRUB_CFG}" <<EOF
 set timeout=10

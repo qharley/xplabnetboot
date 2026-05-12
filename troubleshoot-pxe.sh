@@ -103,6 +103,40 @@ else
     fail "File missing"
 fi
 
+# If menu uses INCLUDE, check the included file instead
+INCLUDED_CFG="$(grep -i '^INCLUDE ' "${TFTP_ROOT}/pxelinux.cfg/default" 2>/dev/null \
+    | awk '{print $2}' | head -1)"
+if [ -n "${INCLUDED_CFG}" ]; then
+    INCLUDED_PATH="${TFTP_ROOT}/${INCLUDED_CFG}"
+    echo ""
+    echo "6b. Included syslinux config: ${INCLUDED_PATH}"
+    if [ -f "${INCLUDED_PATH}" ]; then
+        ENTRY_COUNT="$(grep -ci '^LABEL' "${INCLUDED_PATH}" || echo 0)"
+        ok "Found ${ENTRY_COUNT} LABEL entries in included config"
+        grep -iE "^LABEL|KERNEL|INITRD|APPEND" "${INCLUDED_PATH}" | head -30 | sed 's/^/       /'
+        echo ""
+        echo "6c. GRUB config: ${TFTP_ROOT}/efi64/grub/grub.cfg"
+        if [ -f "${TFTP_ROOT}/efi64/grub/grub.cfg" ]; then
+            ME_COUNT="$(grep -c '^menuentry' "${TFTP_ROOT}/efi64/grub/grub.cfg" || echo 0)"
+            ok "Found ${ME_COUNT} menuentry entries in grub.cfg"
+            grep -E "menuentry|linux |initrd " "${TFTP_ROOT}/efi64/grub/grub.cfg" | head -20 | sed 's/^/       /'
+        else
+            fail "efi64/grub/grub.cfg missing"
+        fi
+        echo ""
+        echo "6d. GRUB fonts/themes (needed for splash):"
+        if [ -d "${TFTP_ROOT}/boot/grub" ]; then
+            ok "${TFTP_ROOT}/boot/grub exists"
+            ls -lh "${TFTP_ROOT}/boot/grub/" | head -15 | sed 's/^/       /'
+        else
+            fail "${TFTP_ROOT}/boot/grub missing – GRUB splash/fonts will fail"
+            info "Re-run setupnetboot.sh to extract /boot/grub/ from the ISO"
+        fi
+    else
+        fail "Included file not found: ${INCLUDED_PATH}"
+    fi
+fi
+
 # ── 7. Services ───────────────────────────────
 echo ""
 echo "7. Services"
