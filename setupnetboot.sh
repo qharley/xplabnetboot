@@ -476,6 +476,26 @@ if [ -n "${BIOS_MENU_CFG}" ]; then
         sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${CFG}"
     done
 
+    # Legacy fallback: if menu splash/background cannot be loaded,
+    # force readable text colors on black and avoid broken background refs.
+    find "${CLONEZILLA_DIR}" -name "*.cfg" -exec sed -i '/^[[:space:]]*MENU[[:space:]]\+BACKGROUND[[:space:]]\+/Id' {} \;
+    BIOS_MENU_PATH="${CLONEZILLA_DIR}/${BIOS_MENU_CFG}"
+    BIOS_TMP_CFG="$(mktemp)"
+    cat > "${BIOS_TMP_CFG}" <<'EOF'
+MENU CLEAR
+MENU COLOR screen      37;40   #ffffffff #00000000 std
+MENU COLOR border      37;40   #ffffffff #00000000 std
+MENU COLOR title       1;37;40 #ffffffff #00000000 std
+MENU COLOR unsel       37;40   #ffffffff #00000000 std
+MENU COLOR sel         30;47   #ff000000 #ffffffff all
+MENU COLOR hotsel      30;47   #ff000000 #ffffffff all
+MENU COLOR timeout_msg 37;40   #ffffffff #00000000 std
+MENU COLOR timeout     1;37;40 #ffffffff #00000000 std
+
+EOF
+    cat "${BIOS_MENU_PATH}" >> "${BIOS_TMP_CFG}"
+    mv "${BIOS_TMP_CFG}" "${BIOS_MENU_PATH}"
+
     echo "==> Writing BIOS PXE menu to include ISO's syslinux menu..."
     # INCLUDE pulls the Clonezilla syslinux config into pxelinux so the
     # original menu is shown verbatim. Kernel/initrd paths and fetch= have
@@ -491,6 +511,13 @@ UI menu.c32
 PROMPT 0
 TIMEOUT 100
 MENU TITLE PXE Boot Menu
+MENU CLEAR
+MENU COLOR screen      37;40   #ffffffff #00000000 std
+MENU COLOR border      37;40   #ffffffff #00000000 std
+MENU COLOR title       1;37;40 #ffffffff #00000000 std
+MENU COLOR unsel       37;40   #ffffffff #00000000 std
+MENU COLOR sel         30;47   #ff000000 #ffffffff all
+MENU COLOR hotsel      30;47   #ff000000 #ffffffff all
 
 LABEL bootiso
   MENU LABEL Boot Clonezilla Live (${ISO_NAME})
@@ -540,12 +567,25 @@ if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
         -e 's|initrd[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         "${TFTP_ROOT}/boot/grub/grub.cfg" > "${ISO_GRUB_CFG}"
     sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
+
+    # Force readable colors on black background in case theme/splash assets
+    # are missing or fail to load over TFTP.
+    GRUB_TMP_CFG="$(mktemp)"
+    cat > "${GRUB_TMP_CFG}" <<'EOF'
+set color_normal=white/black
+set color_highlight=black/light-gray
+
+EOF
+    cat "${ISO_GRUB_CFG}" >> "${GRUB_TMP_CFG}"
+    mv "${GRUB_TMP_CFG}" "${ISO_GRUB_CFG}"
     echo "    UEFI menu: ISO grub.cfg rewritten → ${ISO_GRUB_CFG}"
 else
     echo "    No grub.cfg found in ISO. Writing generic UEFI menu."
     cat > "${ISO_GRUB_CFG}" <<EOF
 set timeout=10
 set default=0
+set color_normal=white/black
+set color_highlight=black/light-gray
 
 menuentry "Boot Clonezilla Live (${ISO_NAME})" {
     linux /iso-boot/vmlinuz boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
