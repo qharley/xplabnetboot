@@ -101,6 +101,8 @@ EOF
 # Also place bootx64.efi at the root for simpler DHCP filename config
 if [ -f "${TFTP_ROOT}/efi64/bootx64.efi" ]; then
     cp "${TFTP_ROOT}/efi64/bootx64.efi" "${TFTP_ROOT}/bootx64.efi"
+    mkdir -p "${TFTP_ROOT}/EFI/BOOT"
+    cp "${TFTP_ROOT}/efi64/bootx64.efi" "${TFTP_ROOT}/EFI/BOOT/bootx64.efi"
 fi
 
 # ─────────────────────────────────────────────
@@ -150,8 +152,9 @@ dhcp-match=set:efi-x86_64,option:client-arch,7
 dhcp-match=set:efi-bc,option:client-arch,7
 
 # Serve correct bootloader based on client type
-dhcp-boot=tag:efi-x86_64,efi64/bootx64.efi,,${ALPINE_IP}
-dhcp-boot=tag:efi-bc,efi64/bootx64.efi,,${ALPINE_IP}
+# Use EFI/BOOT/bootx64.efi for widest firmware/DHCP compatibility.
+dhcp-boot=tag:efi-x86_64,EFI/BOOT/bootx64.efi,,${ALPINE_IP}
+dhcp-boot=tag:efi-bc,EFI/BOOT/bootx64.efi,,${ALPINE_IP}
 # Use lpxelinux.0 so BIOS clients can fetch HTTP URLs (memdisk + ISO over HTTP).
 dhcp-boot=tag:!efi-x86_64,tag:!efi-bc,lpxelinux.0,,${ALPINE_IP}
 
@@ -622,16 +625,16 @@ echo "   → Network Booting:"
 echo "     Enable           : ✔"
 echo "     Next Server      : ${ALPINE_IP}"
 echo "     Default BIOS     : lpxelinux.0   (HTTP-capable syslinux)"
-echo "     Default UEFI     : efi64/bootx64.efi"
+echo "     Default UEFI     : EFI/BOOT/bootx64.efi"
 echo ""
 echo " Client boot files:"
 echo "   BIOS clients  → lpxelinux.0       (syslinux w/ HTTP + memdisk)"
-echo "   UEFI clients  → efi64/bootx64.efi (grub-efi)"
+echo "   UEFI clients  → EFI/BOOT/bootx64.efi (grub-efi)"
 echo ""
 echo " Test TFTP access:"
 echo "   tftp ${ALPINE_IP}"
 echo "   > get pxelinux.0"
-echo "   > get efi64/bootx64.efi"
+echo "   > get EFI/BOOT/bootx64.efi"
 echo ""
 echo " Test HTTP access:"
 echo "   curl -I http://${ALPINE_IP}/iso/${ISO_NAME}"
