@@ -328,42 +328,58 @@ if [ -f "${ISO_DIR}/${ISO_NAME}" ]; then
     rmdir "${MNT}" 2>/dev/null || true
 
     # For Debian Live (Clonezilla etc.) the client fetches the squashfs directly
-    # from the server via HTTP. The ISO must therefore be loop-mounted persistently
-    # so its internal directory tree (live/filesystem.squashfs, etc.) is visible
-    # under a web-accessible path.
+    # from the server via HTTP. We extract the live/ directory from the ISO using
+    # xorriso so nginx can serve it as plain files — no loop-mount required.
+    # This avoids Alpine kernel module issues with loop devices.
     if [ "${DISTRO}" = "debian-live" ]; then
         ISO_CONTENTS="${HTTP_ROOT}/iso-contents"
         mkdir -p "${ISO_CONTENTS}"
-        # Unmount first in case a previous run left a stale mount
-        umount "${ISO_CONTENTS}" 2>/dev/null || true
-        if mount -o loop,ro "${ISO_DIR}/${ISO_NAME}" "${ISO_CONTENTS}"; then
-            echo "    ISO loop-mounted at ${ISO_CONTENTS} (served as /iso-contents/)"
-            # Detect the actual squashfs filename to avoid HTTP 404 on non-standard names.
-            LIVE_SQUASHFS_FILE=""
-            for S in "${ISO_CONTENTS}/live/filesystem.squashfs" ${ISO_CONTENTS}/live/*.squashfs; do
-                if [ -f "${S}" ]; then
-                    LIVE_SQUASHFS_FILE="$(basename "${S}")"
-                    break
-                fi
-            done
 
-            if [ -n "${LIVE_SQUASHFS_FILE}" ]; then
-                LIVE_SQUASHFS_URL="http://${ALPINE_IP}/iso-contents/live/${LIVE_SQUASHFS_FILE}"
-                echo "    Using squashfs: /iso-contents/live/${LIVE_SQUASHFS_FILE}"
-            else
-                echo "    WARNING: No *.squashfs found in ${ISO_CONTENTS}/live; using default path."
-            fi
+        echo "    Extracting live/ directory from ISO using xorriso..."
+        apk add --quiet xorriso 2>/dev/null || true
 
-            EXTRA_CMDLINE="boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet"
+        if xorriso -osirrox on -indev "${ISO_DIR}/${ISO_NAME}" \
+            -extract /live "${ISO_CONTENTS}/live" >/dev/null 2>&1; then
+            echo "    Extracted live/ to ${ISO_CONTENTS}/live"
         else
-            echo "    WARNING: Could not loop-mount ISO. The 'fetch=' URL may fail."
-            echo "    Manually run: mount -o loop,ro ${ISO_DIR}/${ISO_NAME} ${ISO_CONTENTS}"
+            echo "    WARNING: xorriso extraction of live/ failed."
+            echo "    Trying loop-mount fallback..."
+            apk add --quiet util-linux 2>/dev/null || true
+            modprobe loop 2>/dev/null || true
+            umount "${ISO_CONTENTS}" 2>/dev/null || true
+            if mount -o loop,ro "${ISO_DIR}/${ISO_NAME}" "${ISO_CONTENTS}"; then
+                echo "    ISO loop-mounted at ${ISO_CONTENTS}"
+            else
+                echo "    ERROR: Both xorriso extraction and loop-mount failed."
+                echo "    The fetch= URL will 404 until you manually extract live/ to ${ISO_CONTENTS}/live/"
+            fi
         fi
-        # Ensure the mount survives reboots via /etc/fstab
-        FSTAB_ENTRY="${ISO_DIR}/${ISO_NAME}  ${ISO_CONTENTS}  iso9660  loop,ro  0 0"
-        if ! grep -qF "${ISO_DIR}/${ISO_NAME}" /etc/fstab; then
-            echo "${FSTAB_ENTRY}" >> /etc/fstab
-            echo "    Added fstab entry for persistent ISO loop-mount."
+
+        # Detect actual squashfs filename
+        LIVE_SQUASHFS_FILE=""
+        for S in "${ISO_CONTENTS}/live/filesystem.squashfs" "${ISO_CONTENTS}/live/"*.squashfs; do
+            [ -f "${S}" ] && LIVE_SQUASHFS_FILE="$(basename "${S}")" && break
+        done
+
+        if [ -n "${LIVE_SQUASHFS_FILE}" ]; then
+            LIVE_SQUASHFS_URL="http://${ALPINE_IP}/iso-contents/live/${LIVE_SQUASHFS_FILE}"
+            echo "    Squashfs detected: ${LIVE_SQUASHFS_FILE}"
+            echo "    Fetch URL: ${LIVE_SQUASHFS_URL}"
+        else
+            echo "    WARNING: No *.squashfs found in ${ISO_CONTENTS}/live/"
+            echo "    Contents of ${ISO_CONTENTS}/live/ (if any):"
+            ls -lh "${ISO_CONTENTS}/live/" 2>/dev/null || echo "      (directory missing or empty)"
+        fi
+
+        EXTRA_CMDLINE="boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet"
+
+        # Persist loop-mount across reboots only if loop-mounted (not xorriso extracted)
+        if mountpoint -q "${ISO_CONTENTS}" 2>/dev/null; then
+            FSTAB_ENTRY="${ISO_DIR}/${ISO_NAME}  ${ISO_CONTENTS}  iso9660  loop,ro  0 0"
+            if ! grep -qF "${ISO_DIR}/${ISO_NAME}" /etc/fstab; then
+                echo "${FSTAB_ENTRY}" >> /etc/fstab
+                echo "    Added fstab entry for persistent ISO loop-mount."
+            fi
         fi
     fi
 
