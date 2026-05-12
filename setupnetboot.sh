@@ -6,6 +6,7 @@ set -e
 # ─────────────────────────────────────────────
 ALPINE_IP="192.168.1.10"                  # IP of this Alpine PXE server
 ISO_URL="https://example.com/your.iso"    # URL to download the ISO (or leave blank to copy manually)
+UEFI_USB_ZIP_URL="https://example.com/your.zip"  # Optional: ZIP containing EFI/BOOT/bootx64.efi + boot/grub/
 ISO_NAME="boot.iso"                       # Filename for the ISO
 TFTP_ROOT="/srv/tftp"
 HTTP_ROOT="/srv/http"
@@ -16,7 +17,7 @@ ISO_DIR="${HTTP_ROOT}/iso"
 # ─────────────────────────────────────────────
 echo "==> Updating apk and installing packages..."
 apk update
-apk add dnsmasq syslinux nginx wget curl bash grub grub-efi
+apk add dnsmasq syslinux nginx wget curl bash grub grub-efi unzip
 
 # ─────────────────────────────────────────────
 # Set up TFTP directory structure
@@ -43,6 +44,45 @@ cp /usr/share/syslinux/reboot.c32       "${TFTP_ROOT}/" 2>/dev/null || true
 cp /usr/share/syslinux/poweroff.c32     "${TFTP_ROOT}/" 2>/dev/null || true
 cp /usr/share/syslinux/memdisk          "${TFTP_ROOT}/"
 
+# Optional: import UEFI artifacts from a known-good USB ZIP.
+USE_USB_UEFI=0
+if [ -n "${UEFI_USB_ZIP_URL}" ]; then
+    echo "==> Trying USB UEFI artifact import from ZIP..."
+    USB_TMP_DIR="$(mktemp -d)"
+    USB_ZIP_FILE="${USB_TMP_DIR}/uefi-usb.zip"
+    if wget -O "${USB_ZIP_FILE}" "${UEFI_USB_ZIP_URL}" >/dev/null 2>&1; then
+        if unzip -qo "${USB_ZIP_FILE}" -d "${USB_TMP_DIR}/unzipped" >/dev/null 2>&1; then
+            USB_EFI_FILE="$(find "${USB_TMP_DIR}/unzipped" -type f \( -path '*/EFI/BOOT/bootx64.efi' -o -iname 'bootx64.efi' \) | head -1)"
+            USB_GRUB_DIR="$(find "${USB_TMP_DIR}/unzipped" -type d -path '*/boot/grub' | head -1)"
+
+            if [ -n "${USB_EFI_FILE}" ]; then
+                echo "    Using USB EFI loader: ${USB_EFI_FILE}"
+                cp "${USB_EFI_FILE}" "${TFTP_ROOT}/efi64/bootx64.efi"
+                cp "${USB_EFI_FILE}" "${TFTP_ROOT}/bootx64.efi"
+                mkdir -p "${TFTP_ROOT}/EFI/BOOT"
+                cp "${USB_EFI_FILE}" "${TFTP_ROOT}/EFI/BOOT/bootx64.efi"
+                USE_USB_UEFI=1
+            else
+                echo "    WARNING: bootx64.efi not found in ZIP."
+            fi
+
+            if [ -n "${USB_GRUB_DIR}" ]; then
+                echo "    Using USB GRUB assets: ${USB_GRUB_DIR}"
+                mkdir -p "${TFTP_ROOT}/boot/grub"
+                cp -a "${USB_GRUB_DIR}/." "${TFTP_ROOT}/boot/grub/"
+                USE_USB_UEFI=1
+            else
+                echo "    WARNING: boot/grub directory not found in ZIP."
+            fi
+        else
+            echo "    WARNING: Could not unzip USB artifact ZIP."
+        fi
+    else
+        echo "    WARNING: Could not download USB artifact ZIP from ${UEFI_USB_ZIP_URL}."
+    fi
+    rm -rf "${USB_TMP_DIR}"
+fi
+
 # ─────────────────────────────────────────────
 # Set up UEFI GRUB bootloader
 # ─────────────────────────────────────────────
@@ -50,7 +90,9 @@ echo "==> Setting up UEFI GRUB bootloader..."
 
 # Check what modules are available and build with compatible ones
 GRUB_MODULES_DIR="/usr/lib/grub/x86_64-efi"
-if [ -d "$GRUB_MODULES_DIR" ]; then
+if [ "${USE_USB_UEFI}" = "1" ]; then
+    echo "==> Using USB-provided UEFI artifacts; skipping grub-mkimage build."
+elif [ -d "$GRUB_MODULES_DIR" ]; then
     # Use standard linux module instead of linuxefi for Alpine
     echo "==> Building GRUB EFI image with available modules..."
     grub-mkimage \
@@ -79,6 +121,7 @@ fi
 # Create placeholder GRUB config for UEFI clients.
 # The real menu entry for the ISO is appended later, after extraction, when
 # we know the correct kernel/initrd path and command line for the detected distro.
+if [ ! -f "${TFTP_ROOT}/efi64/grub/grub.cfg" ]; then
 cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
 set timeout=10
 set default=0
@@ -97,6 +140,7 @@ menuentry "Shutdown" {
     halt
 }
 EOF
+fi
 
 # Also place bootx64.efi at the root for simpler DHCP filename config
 if [ -f "${TFTP_ROOT}/efi64/bootx64.efi" ]; then
@@ -535,16 +579,20 @@ fi
 # asset is reachable without touching any path inside grub.cfg.
 echo "==> Extracting ISO /boot/grub/ tree for UEFI (fonts, themes, splash)..."
 mkdir -p "${TFTP_ROOT}/boot/grub"
-if xorriso -osirrox on -indev "${ISO_DIR}/${ISO_NAME}" \
-    -extract /boot/grub "${TFTP_ROOT}/boot/grub" >/dev/null 2>&1; then
-    echo "    Extracted /boot/grub/ → ${TFTP_ROOT}/boot/grub/"
+if [ "${USE_USB_UEFI}" = "1" ] && [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
+    echo "    Using boot/grub/ from USB artifacts (skip ISO grub extraction)."
 else
-    echo "    WARNING: Could not extract /boot/grub/ from ISO (non-fatal)."
+    if xorriso -osirrox on -indev "${ISO_DIR}/${ISO_NAME}" \
+        -extract /boot/grub "${TFTP_ROOT}/boot/grub" >/dev/null 2>&1; then
+        echo "    Extracted /boot/grub/ → ${TFTP_ROOT}/boot/grub/"
+    else
+        echo "    WARNING: Could not extract /boot/grub/ from ISO (non-fatal)."
+    fi
 fi
 
 # Rewrite kernel/initrd paths and inject fetch= into grub.cfg.
-# Font, theme and splash paths are intentionally left unchanged;
-# they resolve automatically via TFTP from /boot/grub/ above.
+# To avoid firmware-specific hangs before menu display, strip ISO pre-menu
+# graphics/audio/setup logic and keep only menu/submenu entries.
 ISO_GRUB_CFG="${TFTP_ROOT}/efi64/grub/grub.cfg"
 if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
     sed \
@@ -553,8 +601,38 @@ if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
         -e 's|initrd[[:space:]]*/live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         -e 's|initrd[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         "${TFTP_ROOT}/boot/grub/grub.cfg" > "${ISO_GRUB_CFG}"
+
+    if [ "${USE_USB_UEFI}" != "1" ]; then
+        # Replace variable-based kernel commands with explicit ones so we can
+        # safely drop the variable initialization preamble.
+        sed -i \
+            -e 's|\$linux_cmd|linux|g' \
+            -e 's|\$initrd_cmd|initrd|g' \
+            "${ISO_GRUB_CFG}"
+
+        # Keep only menuentry/submenu blocks from the ISO config, removing the
+        # pre-menu initialization section that often triggers blank-screen hangs.
+        ISO_GRUB_MENU_ONLY="$(mktemp)"
+        awk 'f{print} /^(menuentry|submenu)[[:space:]]/{f=1; print}' "${ISO_GRUB_CFG}" > "${ISO_GRUB_MENU_ONLY}"
+
+        cat > "${ISO_GRUB_CFG}" <<EOF
+set timeout=20
+set default=0
+set timeout_style=menu
+set color_normal=white/black
+set color_highlight=black/white
+
+EOF
+        cat "${ISO_GRUB_MENU_ONLY}" >> "${ISO_GRUB_CFG}"
+        rm -f "${ISO_GRUB_MENU_ONLY}"
+    fi
+
     sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
-    echo "    UEFI menu: ISO grub.cfg rewritten → ${ISO_GRUB_CFG}"
+    if [ "${USE_USB_UEFI}" = "1" ]; then
+        echo "    UEFI menu: USB native GRUB rewritten for PXE → ${ISO_GRUB_CFG}"
+    else
+        echo "    UEFI menu: sanitized ISO menu written → ${ISO_GRUB_CFG}"
+    fi
 else
     echo "    No grub.cfg found in ISO. Writing generic UEFI menu."
     cat > "${ISO_GRUB_CFG}" <<EOF
