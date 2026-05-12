@@ -428,55 +428,75 @@ if [ -z "${KERNEL_REL}" ] && [ -d "${HTTP_ROOT}/iso-contents/live" ]; then
 fi
 
 # ─────────────────────────────────────────────
-# Regenerate BIOS PXE menu with ISO entry
+# Extract and adapt the ISO's own boot menus so the original
+# Clonezilla/Debian Live menu appears over PXE unchanged,
+# with only the file paths and fetch= URL rewritten.
 # ─────────────────────────────────────────────
-echo "==> Writing final BIOS PXE boot menu..."
+CLONEZILLA_DIR="${TFTP_ROOT}/clonezilla"
+mkdir -p "${CLONEZILLA_DIR}"
 
-BOOTISO_ENTRY=""
-if [ -n "${KERNEL_REL}" ]; then
-        BOOTISO_ENTRY=$(cat <<EOF
-LABEL bootiso
-    MENU LABEL Boot ${DISTRO} (${ISO_NAME})
-    MENU DEFAULT
-    KERNEL ${KERNEL_REL}
-    INITRD ${INITRD_REL}
-    APPEND ${EXTRA_CMDLINE}
+echo "==> Extracting ISO syslinux menu configs..."
+# Clonezilla uses syslinux/, older Debian live uses isolinux/
+for SRCDIR in syslinux isolinux; do
+    if xorriso -osirrox on -indev "${ISO_DIR}/${ISO_NAME}" \
+        -extract "/${SRCDIR}" "${CLONEZILLA_DIR}" >/dev/null 2>&1; then
+        echo "    Extracted /${SRCDIR} → ${CLONEZILLA_DIR}"
+        break
+    fi
+done
 
+# Copy compatible .c32 modules from Alpine syslinux package into the
+# extracted dir so versions match our lpxelinux.0/pxelinux.0.
+for C in menu.c32 vesamenu.c32 ldlinux.c32 libcom32.c32 libutil.c32 reboot.c32 poweroff.c32; do
+    cp "/usr/share/syslinux/${C}" "${CLONEZILLA_DIR}/" 2>/dev/null || true
+done
+
+# Determine which .cfg is the entry point
+BIOS_MENU_CFG=""
+for F in syslinux.cfg menu.cfg isolinux.cfg; do
+    [ -f "${CLONEZILLA_DIR}/${F}" ] && BIOS_MENU_CFG="${F}" && break
+done
+
+if [ -n "${BIOS_MENU_CFG}" ]; then
+    echo "    Rewriting paths in extracted configs..."
+    # Rewrite all .cfg files in the extracted dir:
+    #   KERNEL /live/vmlinuz* or live/vmlinuz* → KERNEL iso-boot/vmlinuz
+    #   initrd=/live/... or initrd=live/...    → initrd=iso-boot/initrd
+    #   Append fetch= to any APPEND line containing boot=live
+    find "${CLONEZILLA_DIR}" -name "*.cfg" | while read -r CFG; do
+        sed -i \
+            -e 's|KERNEL[[:space:]]*/live/vmlinuz[^[:space:]]*|KERNEL iso-boot/vmlinuz|gI' \
+            -e 's|KERNEL[[:space:]]*live/vmlinuz[^[:space:]]*|KERNEL iso-boot/vmlinuz|gI' \
+            -e 's|initrd=/live/[^[:space:]]*|initrd=iso-boot/initrd|g' \
+            -e 's|initrd=live/[^[:space:]]*|initrd=iso-boot/initrd|g' \
+            -e 's|/live/vmlinuz[^[:space:]]*|iso-boot/vmlinuz|g' \
+            -e 's|/live/initrd[^[:space:]]*|iso-boot/initrd|g' \
+            "${CFG}"
+        # Add fetch= to APPEND lines that contain boot=live but don't already have fetch=
+        sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${CFG}"
+    done
+
+    echo "==> Writing BIOS PXE menu to chain into ISO's syslinux menu..."
+    cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
+# Chain into the ISO's own syslinux menu.
+# All kernel/initrd paths and fetch= URLs have been rewritten for PXE.
+DEFAULT clonezilla/${BIOS_MENU_CFG}
 EOF
-)
-elif [ -f "${HTTP_ROOT}/iso-contents/live/vmlinuz" ] && [ -f "${HTTP_ROOT}/iso-contents/live/initrd.img" ]; then
-        # Fallback for Debian Live / Clonezilla when extraction failed for any reason.
-        # lpxelinux.0 can fetch kernel/initrd directly via HTTP.
-        DISTRO="debian-live-http-fallback"
-        BOOTISO_ENTRY=$(cat <<EOF
-LABEL bootiso
-    MENU LABEL Boot Clonezilla Live (${ISO_NAME})
-    MENU DEFAULT
-    KERNEL http://${ALPINE_IP}/iso-contents/live/vmlinuz
-    APPEND initrd=http://${ALPINE_IP}/iso-contents/live/initrd.img boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
-
-EOF
-)
-fi
-
-if [ -z "${BOOTISO_ENTRY}" ]; then
-        # Keep an explicit menu item so users see why ISO boot is unavailable.
-        BOOTISO_ENTRY=$(cat <<EOF
-LABEL bootiso
-    MENU LABEL Boot from ISO (${ISO_NAME}) [not ready]
-    LOCALBOOT 0
-
-EOF
-)
-fi
-
-cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
+    echo "    BIOS menu: pxelinux.cfg/default → clonezilla/${BIOS_MENU_CFG}"
+else
+    echo "    WARNING: No syslinux/isolinux .cfg found in ISO. Using generic BIOS menu."
+    cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
 PROMPT 0
 TIMEOUT 100
-MENU TITLE PXE Boot Menu (BIOS) – ${DISTRO}
+MENU TITLE PXE Boot Menu
 
-${BOOTISO_ENTRY}
+LABEL bootiso
+  MENU LABEL Boot Clonezilla Live (${ISO_NAME})
+  MENU DEFAULT
+  KERNEL iso-boot/vmlinuz
+  INITRD iso-boot/initrd
+  APPEND boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
 
 LABEL local
   MENU LABEL Boot from Local Disk
@@ -490,41 +510,42 @@ LABEL poweroff
   MENU LABEL Power Off
   COM32 poweroff.c32
 EOF
-
-if [ -z "${KERNEL_REL}" ]; then
-    echo "WARNING: Boot artifacts were not generated from ISO."
-    echo "  Verify ISO exists at ${ISO_DIR}/${ISO_NAME} and contains live/vmlinuz + live/initrd*."
 fi
 
-if [ -n "${KERNEL_REL}" ]; then
-    echo "==> Adding ISO entry to UEFI GRUB menu..."
-    cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
-set timeout=10
-set default=0
+# ── UEFI: extract and rewrite the ISO's own grub.cfg ──────────────────
+echo "==> Extracting ISO GRUB config for UEFI..."
+ISO_GRUB_CFG="${TFTP_ROOT}/efi64/grub/grub.cfg"
+EXTRACTED_GRUB="$(mktemp)"
 
-menuentry "Boot ${DISTRO} (${ISO_NAME})" {
-    echo "Loading kernel and initrd over TFTP..."
-    linux  /${KERNEL_REL} ${EXTRA_CMDLINE}
-    initrd /${INITRD_REL}
-}
+if xorriso -osirrox on -indev "${ISO_DIR}/${ISO_NAME}" \
+    -extract /boot/grub/grub.cfg "${EXTRACTED_GRUB}" >/dev/null 2>&1 \
+    && [ -s "${EXTRACTED_GRUB}" ]; then
 
-menuentry "Boot from Local Disk" {
-    set root=(hd0)
-    chainloader +1
-}
-
-menuentry "Reboot" { reboot }
-menuentry "Shutdown" { halt }
-EOF
+    echo "    Extracted /boot/grub/grub.cfg from ISO"
+    # Rewrite paths:
+    #   linux /live/vmlinuz* → linux /iso-boot/vmlinuz
+    #   initrd /live/initrd* → initrd /iso-boot/initrd
+    #   Add fetch= to linux lines containing boot=live
+    sed \
+        -e 's|linux[[:space:]]*/live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
+        -e 's|linux[[:space:]]*live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
+        -e 's|initrd[[:space:]]*/live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
+        -e 's|initrd[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
+        "${EXTRACTED_GRUB}" > "${ISO_GRUB_CFG}"
+    # Add fetch= to linux lines that have boot=live but no fetch= yet
+    sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
+    rm -f "${EXTRACTED_GRUB}"
+    echo "    UEFI menu: using rewritten ISO grub.cfg"
 else
-    echo "==> Writing UEFI GRUB menu with ISO placeholder..."
-    cat > "${TFTP_ROOT}/efi64/grub/grub.cfg" <<EOF
+    rm -f "${EXTRACTED_GRUB}"
+    echo "    No grub.cfg found in ISO. Writing generic UEFI menu."
+    cat > "${ISO_GRUB_CFG}" <<EOF
 set timeout=10
 set default=0
 
-menuentry "Boot from ISO (${ISO_NAME}) [not ready]" {
-    echo "ISO boot entry was not generated."
-    echo "Check ISO path and extraction output in setup logs."
+menuentry "Boot Clonezilla Live (${ISO_NAME})" {
+    linux /iso-boot/vmlinuz boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
+    initrd /iso-boot/initrd
 }
 
 menuentry "Boot from Local Disk" {
