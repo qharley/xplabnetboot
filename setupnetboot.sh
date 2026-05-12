@@ -475,18 +475,13 @@ if [ -n "${BIOS_MENU_CFG}" ]; then
         # Add fetch= to APPEND lines that contain boot=live but don't already have fetch=
         sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${CFG}"
     done
-
-    echo "==> Writing BIOS PXE menu to include ISO's syslinux menu..."
-    # INCLUDE pulls the Clonezilla syslinux config into pxelinux so the
-    # original menu is shown verbatim. Kernel/initrd paths and fetch= have
-    # already been rewritten in the extracted .cfg files above.
-    cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
-INCLUDE clonezilla/${BIOS_MENU_CFG}
-EOF
-    echo "    BIOS menu: pxelinux.cfg/default INCLUDE clonezilla/${BIOS_MENU_CFG}"
+    echo "    BIOS configs extracted and rewritten (available for manual use if needed)"
 else
-    echo "    WARNING: No syslinux/isolinux .cfg found in ISO. Using generic BIOS menu."
-    cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
+    echo "    WARNING: No syslinux/isolinux .cfg found in ISO."
+fi
+
+# Always write a simple working BIOS menu as default fallback
+cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
 PROMPT 0
 TIMEOUT 100
@@ -511,7 +506,7 @@ LABEL poweroff
   MENU LABEL Power Off
   COM32 poweroff.c32
 EOF
-fi
+echo "==> BIOS menu written to pxelinux.cfg/default"
 
 # ── UEFI: extract the full /boot/grub/ tree from the ISO ──────────────
 # Clonezilla's grub.cfg references fonts, themes and splash images with
@@ -540,9 +535,7 @@ if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
         -e 's|initrd[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         "${TFTP_ROOT}/boot/grub/grub.cfg" > "${ISO_GRUB_CFG}"
     sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
-    echo "    UEFI menu: ISO grub.cfg rewritten → ${ISO_GRUB_CFG}"
 else
-    echo "    No grub.cfg found in ISO. Writing generic UEFI menu."
     cat > "${ISO_GRUB_CFG}" <<EOF
 set timeout=10
 set default=0
@@ -561,6 +554,7 @@ menuentry "Reboot" { reboot }
 menuentry "Shutdown" { halt }
 EOF
 fi
+echo "==> UEFI menu written to ${ISO_GRUB_CFG}"
 
 # ─────────────────────────────────────────────
 # Enable and start services
