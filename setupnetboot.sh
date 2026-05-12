@@ -451,13 +451,24 @@ for C in menu.c32 vesamenu.c32 ldlinux.c32 libcom32.c32 libutil.c32 reboot.c32 p
     cp "/usr/share/syslinux/${C}" "${CLONEZILLA_DIR}/" 2>/dev/null || true
 done
 
-# Determine which .cfg is the entry point
-BIOS_MENU_CFG=""
+# Determine which .cfg is the entry point (search recursively, because
+# xorriso extraction may place files under clonezilla/syslinux/ or
+# clonezilla/isolinux/ depending source ISO layout).
+BIOS_MENU_PATH=""
 for F in syslinux.cfg menu.cfg isolinux.cfg; do
-    [ -f "${CLONEZILLA_DIR}/${F}" ] && BIOS_MENU_CFG="${F}" && break
+    BIOS_MENU_PATH="$(find "${CLONEZILLA_DIR}" -type f -name "${F}" | head -1)"
+    [ -n "${BIOS_MENU_PATH}" ] && break
 done
 
-if [ -n "${BIOS_MENU_CFG}" ]; then
+if [ -n "${BIOS_MENU_PATH}" ]; then
+    BIOS_MENU_REL="${BIOS_MENU_PATH#${CLONEZILLA_DIR}/}"
+    BIOS_CFG_DIR="$(dirname "${BIOS_MENU_PATH}")"
+
+    # Ensure required modules are available beside the active cfg tree.
+    for C in menu.c32 vesamenu.c32 ldlinux.c32 libcom32.c32 libutil.c32 reboot.c32 poweroff.c32; do
+        cp "/usr/share/syslinux/${C}" "${BIOS_CFG_DIR}/" 2>/dev/null || true
+    done
+
     echo "    Rewriting paths in extracted configs..."
     # Rewrite all .cfg files in the extracted dir:
     #   KERNEL /live/vmlinuz* or live/vmlinuz* → KERNEL iso-boot/vmlinuz
@@ -465,8 +476,10 @@ if [ -n "${BIOS_MENU_CFG}" ]; then
     #   Append fetch= to any APPEND line containing boot=live
     find "${CLONEZILLA_DIR}" -name "*.cfg" | while read -r CFG; do
         sed -i \
-            -e 's|KERNEL[[:space:]]*/live/vmlinuz[^[:space:]]*|KERNEL iso-boot/vmlinuz|gI' \
-            -e 's|KERNEL[[:space:]]*live/vmlinuz[^[:space:]]*|KERNEL iso-boot/vmlinuz|gI' \
+            -e 's|KERNEL[[:space:]]*/live/vmlinuz[^[:space:]]*|KERNEL iso-boot/vmlinuz|g' \
+            -e 's|KERNEL[[:space:]]*live/vmlinuz[^[:space:]]*|KERNEL iso-boot/vmlinuz|g' \
+            -e 's|kernel[[:space:]]*/live/vmlinuz[^[:space:]]*|KERNEL iso-boot/vmlinuz|g' \
+            -e 's|kernel[[:space:]]*live/vmlinuz[^[:space:]]*|KERNEL iso-boot/vmlinuz|g' \
             -e 's|initrd=/live/[^[:space:]]*|initrd=iso-boot/initrd|g' \
             -e 's|initrd=live/[^[:space:]]*|initrd=iso-boot/initrd|g' \
             -e 's|/live/vmlinuz[^[:space:]]*|iso-boot/vmlinuz|g' \
@@ -475,13 +488,15 @@ if [ -n "${BIOS_MENU_CFG}" ]; then
         # Add fetch= to APPEND lines that contain boot=live but don't already have fetch=
         sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${CFG}"
     done
-    echo "    BIOS configs extracted and rewritten (available for manual use if needed)"
+    echo "==> Writing BIOS PXE menu to include ISO's syslinux menu..."
+    cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
+INCLUDE clonezilla/${BIOS_MENU_REL}
+EOF
+    echo "    BIOS menu: pxelinux.cfg/default INCLUDE clonezilla/${BIOS_MENU_REL}"
 else
     echo "    WARNING: No syslinux/isolinux .cfg found in ISO."
-fi
-
-# Always write a simple working BIOS menu as default fallback
-cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
+    # Fallback: simple working BIOS menu
+    cat > "${TFTP_ROOT}/pxelinux.cfg/default" <<EOF
 UI menu.c32
 PROMPT 1
 TIMEOUT 100
@@ -506,7 +521,8 @@ LABEL poweroff
   MENU LABEL Power Off
   COM32 poweroff.c32
 EOF
-echo "==> BIOS menu written to pxelinux.cfg/default"
+        echo "==> BIOS fallback menu written to pxelinux.cfg/default"
+fi
 
 # ── UEFI: extract the full /boot/grub/ tree from the ISO ──────────────
 # Clonezilla's grub.cfg references fonts, themes and splash images with
@@ -523,13 +539,27 @@ else
     echo "    WARNING: Could not extract /boot/grub/ from ISO (non-fatal)."
 fi
 
-# Rewrite kernel/initrd paths and inject fetch= into grub.cfg.
+# Rewrite kernel/initrd paths in ISO grub.cfg and keep original menu entries.
 # Font, theme and splash paths are intentionally left unchanged;
 # they resolve automatically via TFTP from /boot/grub/ above.
-# ── UEFI: Simple working GRUB menu ──────────────────────
 ISO_GRUB_CFG="${TFTP_ROOT}/efi64/grub/grub.cfg"
-
-cat > "${ISO_GRUB_CFG}" <<EOF
+ISO_GRUB_SRC="$(find "${TFTP_ROOT}/boot/grub" -type f -name grub.cfg | head -1)"
+if [ -n "${ISO_GRUB_SRC}" ] && [ -f "${ISO_GRUB_SRC}" ]; then
+    sed \
+        -e 's|linuxefi[[:space:]]*/live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
+        -e 's|linuxefi[[:space:]]*live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
+        -e 's|linux[[:space:]]*/live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
+        -e 's|linux[[:space:]]*live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
+        -e 's|initrdefi[[:space:]]*/live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
+        -e 's|initrdefi[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
+        -e 's|initrd[[:space:]]*/live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
+        -e 's|initrd[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
+        "${ISO_GRUB_SRC}" > "${ISO_GRUB_CFG}"
+    sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
+    echo "==> UEFI menu: rewritten ISO grub.cfg (${ISO_GRUB_SRC}) → ${ISO_GRUB_CFG}"
+else
+    echo "    WARNING: No ISO grub.cfg found under ${TFTP_ROOT}/boot/grub/. Using fallback UEFI menu."
+    cat > "${ISO_GRUB_CFG}" <<EOF
 set timeout=10
 set default=0
 
@@ -546,8 +576,8 @@ menuentry "Boot from Local Disk" {
 menuentry "Reboot" { reboot }
 menuentry "Shutdown" { halt }
 EOF
-
-echo "==> UEFI menu written to ${ISO_GRUB_CFG}"
+    echo "==> UEFI fallback menu written to ${ISO_GRUB_CFG}"
+fi
 
 # ─────────────────────────────────────────────
 # Enable and start services
