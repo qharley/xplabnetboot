@@ -539,58 +539,29 @@ else
     echo "    WARNING: Could not extract /boot/grub/ from ISO (non-fatal)."
 fi
 
-# Build a safe UEFI startup menu first, then optionally expose the ISO native
-# menu as a separate submenu file. This avoids hangs caused by loading ISO
-# theme/splash directives as the initial config.
+# Rewrite kernel/initrd paths and inject fetch= into grub.cfg.
+# Font, theme and splash paths are intentionally left unchanged;
+# they resolve automatically via TFTP from /boot/grub/ above.
 ISO_GRUB_CFG="${TFTP_ROOT}/efi64/grub/grub.cfg"
-ISO_GRUB_NATIVE="${TFTP_ROOT}/efi64/grub/iso-native.cfg"
-ISO_GRUB_SRC="$(find "${TFTP_ROOT}/boot/grub" -type f -name grub.cfg | head -1)"
-
-if [ -n "${ISO_GRUB_SRC}" ] && [ -f "${ISO_GRUB_SRC}" ]; then
+if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
     sed \
-        -e 's|linuxefi[[:space:]]*/live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
-        -e 's|linuxefi[[:space:]]*live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
         -e 's|linux[[:space:]]*/live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
         -e 's|linux[[:space:]]*live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
-        -e 's|initrdefi[[:space:]]*/live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
-        -e 's|initrdefi[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         -e 's|initrd[[:space:]]*/live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         -e 's|initrd[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
-        "${ISO_GRUB_SRC}" > "${ISO_GRUB_NATIVE}"
-    sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_NATIVE}"
-    echo "==> UEFI native menu prepared: ${ISO_GRUB_NATIVE}"
+        "${TFTP_ROOT}/boot/grub/grub.cfg" > "${ISO_GRUB_CFG}"
+    sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
+    echo "    UEFI menu: ISO grub.cfg rewritten → ${ISO_GRUB_CFG}"
 else
-    rm -f "${ISO_GRUB_NATIVE}"
-    echo "    WARNING: No ISO grub.cfg found under ${TFTP_ROOT}/boot/grub/."
-fi
-
-cat > "${ISO_GRUB_CFG}" <<EOF
-set timeout_style=menu
-set timeout=15
+    echo "    No grub.cfg found in ISO. Writing generic UEFI menu."
+    cat > "${ISO_GRUB_CFG}" <<EOF
+set timeout=10
 set default=0
-terminal_input console
-terminal_output console
-set color_normal=white/black
-set color_highlight=black/white
 
-menuentry "Boot Clonezilla Live (${ISO_NAME}) [UEFI Safe]" {
+menuentry "Boot Clonezilla Live (${ISO_NAME})" {
     linux /iso-boot/vmlinuz boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
     initrd /iso-boot/initrd
 }
-
-if [ -f /efi64/grub/iso-native.cfg ]; then
-menuentry "Boot Clonezilla Live (${ISO_NAME}) [UEFI Native Menu]" {
-    configfile /efi64/grub/iso-native.cfg
-}
-elif [ -f /boot/grub/iso-native.cfg ]; then
-menuentry "Boot Clonezilla Live (${ISO_NAME}) [UEFI Native Menu]" {
-    configfile /boot/grub/iso-native.cfg
-}
-elif [ -f /grub/iso-native.cfg ]; then
-menuentry "Boot Clonezilla Live (${ISO_NAME}) [UEFI Native Menu]" {
-    configfile /grub/iso-native.cfg
-}
-fi
 
 menuentry "Boot from Local Disk" {
     set root=(hd0)
@@ -600,19 +571,7 @@ menuentry "Boot from Local Disk" {
 menuentry "Reboot" { reboot }
 menuentry "Shutdown" { halt }
 EOF
-
-# Mirror startup and native configs for environments where GRUB prefix resolves
-# to /efi64/grub, /boot/grub, or /grub.
-mkdir -p "${TFTP_ROOT}/grub" "${TFTP_ROOT}/boot/grub"
-cp "${ISO_GRUB_CFG}" "${TFTP_ROOT}/boot/grub/grub.cfg"
-cp "${ISO_GRUB_CFG}" "${TFTP_ROOT}/grub/grub.cfg"
-
-if [ -f "${ISO_GRUB_NATIVE}" ]; then
-    cp "${ISO_GRUB_NATIVE}" "${TFTP_ROOT}/boot/grub/iso-native.cfg"
-    cp "${ISO_GRUB_NATIVE}" "${TFTP_ROOT}/grub/iso-native.cfg"
 fi
-
-echo "==> UEFI startup menu written to ${ISO_GRUB_CFG}"
 
 # ─────────────────────────────────────────────
 # Enable and start services
