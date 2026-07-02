@@ -98,9 +98,21 @@ elif [ -d "$GRUB_MODULES_DIR" ]; then
     # Embed a minimal startup config so GRUB initialises the efinet network
     # interface (net_bootp) before attempting to load grub.cfg from TFTP.
     # Without this GRUB cannot reach the TFTP server and drops to a terminal.
+    #
+    # Key points that prevent the "grub>" prompt on UEFI netboot:
+    #   * net_bootp  – runs BOOTP/DHCP so efinet0 gets an IP. GRUB does NOT
+    #                  inherit the firmware's PXE lease, so without this the
+    #                  TFTP read of grub.cfg silently fails.
+    #   * net_dhcp   – fallback for firmware where net_bootp does not lease.
+    #   * set root   – point $root at the TFTP device so absolute paths inside
+    #                  grub.cfg (/iso-boot/vmlinuz, /boot/grub/unicode.pf2, …)
+    #                  resolve over TFTP instead of an unset/local device.
     GRUB_EMBED_CFG="$(mktemp)"
     cat > "${GRUB_EMBED_CFG}" <<GRUBEOF
-net_bootp
+insmod efinet
+insmod tftp
+net_bootp || net_dhcp
+set root=(tftp,${ALPINE_IP})
 set prefix=(tftp,${ALPINE_IP})/efi64/grub
 configfile \$prefix/grub.cfg
 GRUBEOF
@@ -623,8 +635,11 @@ if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
 
         # Keep only menuentry/submenu blocks from the ISO config, removing the
         # pre-menu initialization section that often triggers blank-screen hangs.
+        # NOTE: allow leading whitespace before menuentry/submenu — some ISOs
+        # indent these keywords, and a strict ^ anchor would drop every entry
+        # and leave an empty menu.
         ISO_GRUB_MENU_ONLY="$(mktemp)"
-        awk 'f{print} /^(menuentry|submenu)[[:space:]]/{f=1; print}' "${ISO_GRUB_CFG}" > "${ISO_GRUB_MENU_ONLY}"
+        awk 'f{print} /^[[:space:]]*(menuentry|submenu)[[:space:]]/{f=1; print}' "${ISO_GRUB_CFG}" > "${ISO_GRUB_MENU_ONLY}"
 
         cat > "${ISO_GRUB_CFG}" <<EOF
 set timeout=20
