@@ -95,16 +95,27 @@ if [ "${USE_USB_UEFI}" = "1" ]; then
 elif [ -d "$GRUB_MODULES_DIR" ]; then
     # Use standard linux module instead of linuxefi for Alpine
     echo "==> Building GRUB EFI image with available modules..."
+    # Embed a minimal startup config so GRUB initialises the efinet network
+    # interface (net_bootp) before attempting to load grub.cfg from TFTP.
+    # Without this GRUB cannot reach the TFTP server and drops to a terminal.
+    GRUB_EMBED_CFG="$(mktemp)"
+    cat > "${GRUB_EMBED_CFG}" <<GRUBEOF
+net_bootp
+set prefix=(tftp,${ALPINE_IP})/efi64/grub
+configfile \$prefix/grub.cfg
+GRUBEOF
     grub-mkimage \
         --format=x86_64-efi \
         --output="${TFTP_ROOT}/efi64/bootx64.efi" \
         --prefix="(tftp,${ALPINE_IP})/efi64/grub" \
-        efinet tftp boot linux normal configfile part_gpt \
+        --config="${GRUB_EMBED_CFG}" \
+        efinet net tftp boot linux normal configfile part_gpt \
         part_msdos fat iso9660 udf ext2 xfs btrfs squash4 \
         gzio all_video video_bochs video_cirrus \
         echo test true regexp probe chain halt reboot \
         search search_fs_file search_fs_uuid search_label \
         minicmd cat ls help
+    rm -f "${GRUB_EMBED_CFG}"
 else
     echo "WARNING: GRUB EFI modules not found. Trying alternative approach..."
     # Use pre-built EFI file if available
