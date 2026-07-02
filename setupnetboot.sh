@@ -95,33 +95,39 @@ if [ "${USE_USB_UEFI}" = "1" ]; then
 elif [ -d "$GRUB_MODULES_DIR" ]; then
     # Use standard linux module instead of linuxefi for Alpine
     echo "==> Building GRUB EFI image with available modules..."
-    # Embed a minimal startup config so GRUB initialises the efinet network
-    # interface (net_bootp) before attempting to load grub.cfg from TFTP.
-    # Without this GRUB cannot reach the TFTP server and drops to a terminal.
+    # Embed a minimal startup config so GRUB brings up the network and then
+    # loads grub.cfg over HTTP (not TFTP).
+    #
+    # Why HTTP instead of TFTP for GRUB's own fetches:
+    #   GRUB's built-in TFTP client is unreliable – it often fails blocksize
+    #   negotiation with the firmware/switch, so it downloads bootx64.efi
+    #   (that transfer is done by firmware, not GRUB) but then cannot read
+    #   grub.cfg, and drops to the "grub>" terminal. GRUB's HTTP client is
+    #   far more robust and much faster. nginx already serves the TFTP tree
+    #   at http://IP/tftp/ , so we point GRUB there.
     #
     # Key points that prevent the "grub>" prompt on UEFI netboot:
-    #   * net_bootp  – runs BOOTP/DHCP so efinet0 gets an IP. GRUB does NOT
-    #                  inherit the firmware's PXE lease, so without this the
-    #                  TFTP read of grub.cfg silently fails.
-    #   * net_dhcp   – fallback for firmware where net_bootp does not lease.
-    #   * set root   – point $root at the TFTP device so absolute paths inside
-    #                  grub.cfg (/iso-boot/vmlinuz, /boot/grub/unicode.pf2, …)
-    #                  resolve over TFTP instead of an unset/local device.
+    #   * net_bootp/net_dhcp – GRUB does NOT inherit the firmware's PXE lease,
+    #                          so it must run DHCP itself to get an IP before
+    #                          any (http,...) access works.
+    #   * http prefix/root   – load grub.cfg and everything else over HTTP.
     GRUB_EMBED_CFG="$(mktemp)"
     cat > "${GRUB_EMBED_CFG}" <<GRUBEOF
 insmod efinet
+insmod net
 insmod tftp
+insmod http
 net_bootp || net_dhcp
-set root=(tftp,${ALPINE_IP})
-set prefix=(tftp,${ALPINE_IP})/efi64/grub
+set root=(http,${ALPINE_IP})
+set prefix=(http,${ALPINE_IP})/tftp/efi64/grub
 configfile \$prefix/grub.cfg
 GRUBEOF
     grub-mkimage \
         --format=x86_64-efi \
         --output="${TFTP_ROOT}/efi64/bootx64.efi" \
-        --prefix="(tftp,${ALPINE_IP})/efi64/grub" \
+        --prefix="(http,${ALPINE_IP})/tftp/efi64/grub" \
         --config="${GRUB_EMBED_CFG}" \
-        efinet net tftp boot linux normal configfile part_gpt \
+        efinet net tftp http boot linux normal configfile part_gpt \
         part_msdos fat iso9660 udf ext2 xfs btrfs squash4 \
         gzio all_video video_bochs video_cirrus \
         echo test true regexp probe chain halt reboot \
@@ -269,9 +275,16 @@ server {
         autoindex on;
     }
     
-    # Serve other TFTP files via HTTP as fallback
+    # Serve the TFTP tree over HTTP as well. UEFI GRUB loads grub.cfg, the
+    # kernel and the initrd from here (http://IP/tftp/...) because GRUB's HTTP
+    # client is far more reliable and faster than its built-in TFTP client.
     location /tftp/ {
         alias ${TFTP_ROOT}/;
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        client_max_body_size 4G;
+        add_header Accept-Ranges bytes;
         autoindex on;
     }
 }
@@ -647,12 +660,15 @@ set color_highlight=black/white
 
 EOF
         if [ -n "${KERNEL_REL}" ] && [ -s "${TFTP_ROOT}/${KERNEL_REL}" ] && [ -s "${TFTP_ROOT}/${INITRD_REL}" ]; then
+            # Fetch kernel/initrd over HTTP (fast + reliable) via the nginx
+            # /tftp/ alias, using explicit (http,IP) device paths so they do
+            # not depend on the current value of $root.
             cat <<EOF
 menuentry "Boot ${ISO_NAME} (live)" {
-    echo "Fetching kernel over TFTP (this can take a while)..."
-    linux /${KERNEL_REL} ${EXTRA_CMDLINE}
-    echo "Fetching initrd over TFTP..."
-    initrd /${INITRD_REL}
+    echo "Fetching kernel over HTTP..."
+    linux (http,${ALPINE_IP})/tftp/${KERNEL_REL} ${EXTRA_CMDLINE}
+    echo "Fetching initrd over HTTP..."
+    initrd (http,${ALPINE_IP})/tftp/${INITRD_REL}
 }
 
 EOF
@@ -738,4 +754,6 @@ echo "   > get EFI/BOOT/bootx64.efi"
 echo ""
 echo " Test HTTP access:"
 echo "   curl -I http://${ALPINE_IP}/iso/${ISO_NAME}"
+echo "   curl -I http://${ALPINE_IP}/tftp/efi64/grub/grub.cfg   # UEFI menu"
+echo "   curl -I http://${ALPINE_IP}/tftp/iso-boot/vmlinuz      # UEFI kernel"
 echo ""
