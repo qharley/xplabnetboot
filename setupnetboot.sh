@@ -613,35 +613,32 @@ else
     fi
 fi
 
-# Rewrite kernel/initrd paths and inject fetch= into grub.cfg.
-# To avoid firmware-specific hangs before menu display, strip ISO pre-menu
-# graphics/audio/setup logic and keep only menu/submenu entries.
+# Build the UEFI GRUB menu.
+#
+# IMPORTANT: We do NOT reuse the ISO's own grub.cfg for the non-USB case.
+# Clonezilla/Debian-Live grub.cfg relies on a themed pre-menu preamble,
+# variable-based menuentries ($linux_cmd/$initrd_cmd) and $root-relative
+# paths. Over PXE those frequently reduce to a config with NO usable
+# menuentry, so GRUB loads it, has nothing to show, and drops to the
+# "grub>" terminal (the exact symptom). Instead we author a minimal menu
+# ourselves using the kernel/initrd we already extracted to /iso-boot,
+# which is guaranteed to parse and always renders entries.
 ISO_GRUB_CFG="${TFTP_ROOT}/efi64/grub/grub.cfg"
-if [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
+if [ "${USE_USB_UEFI}" = "1" ] && [ -f "${TFTP_ROOT}/boot/grub/grub.cfg" ]; then
+    # USB-provided native GRUB: keep the original menu, only rewrite paths
+    # and inject fetch=.
     sed \
         -e 's|linux[[:space:]]*/live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
         -e 's|linux[[:space:]]*live/vmlinuz[^[:space:]]*|linux /iso-boot/vmlinuz|g' \
         -e 's|initrd[[:space:]]*/live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         -e 's|initrd[[:space:]]*live/initrd[^[:space:]]*|initrd /iso-boot/initrd|g' \
         "${TFTP_ROOT}/boot/grub/grub.cfg" > "${ISO_GRUB_CFG}"
-
-    if [ "${USE_USB_UEFI}" != "1" ]; then
-        # Replace variable-based kernel commands with explicit ones so we can
-        # safely drop the variable initialization preamble.
-        sed -i \
-            -e 's|\$linux_cmd|linux|g' \
-            -e 's|\$initrd_cmd|initrd|g' \
-            "${ISO_GRUB_CFG}"
-
-        # Keep only menuentry/submenu blocks from the ISO config, removing the
-        # pre-menu initialization section that often triggers blank-screen hangs.
-        # NOTE: allow leading whitespace before menuentry/submenu — some ISOs
-        # indent these keywords, and a strict ^ anchor would drop every entry
-        # and leave an empty menu.
-        ISO_GRUB_MENU_ONLY="$(mktemp)"
-        awk 'f{print} /^[[:space:]]*(menuentry|submenu)[[:space:]]/{f=1; print}' "${ISO_GRUB_CFG}" > "${ISO_GRUB_MENU_ONLY}"
-
-        cat > "${ISO_GRUB_CFG}" <<EOF
+    sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
+    echo "    UEFI menu: USB native GRUB rewritten for PXE → ${ISO_GRUB_CFG}"
+else
+    echo "==> Writing self-authored UEFI GRUB menu (guaranteed valid entries)..."
+    {
+        cat <<EOF
 set timeout=20
 set default=0
 set timeout_style=menu
@@ -649,27 +646,24 @@ set color_normal=white/black
 set color_highlight=black/white
 
 EOF
-        cat "${ISO_GRUB_MENU_ONLY}" >> "${ISO_GRUB_CFG}"
-        rm -f "${ISO_GRUB_MENU_ONLY}"
-    fi
-
-    sed -i "/boot=live/{ /fetch=/!s|$| fetch=${LIVE_SQUASHFS_URL}|; }" "${ISO_GRUB_CFG}"
-    if [ "${USE_USB_UEFI}" = "1" ]; then
-        echo "    UEFI menu: USB native GRUB rewritten for PXE → ${ISO_GRUB_CFG}"
-    else
-        echo "    UEFI menu: sanitized ISO menu written → ${ISO_GRUB_CFG}"
-    fi
-else
-    echo "    No grub.cfg found in ISO. Writing generic UEFI menu."
-    cat > "${ISO_GRUB_CFG}" <<EOF
-set timeout=10
-set default=0
-
-menuentry "Boot Clonezilla Live (${ISO_NAME})" {
-    linux /iso-boot/vmlinuz boot=live union=overlay fetch=${LIVE_SQUASHFS_URL} components quiet
-    initrd /iso-boot/initrd
+        if [ -n "${KERNEL_REL}" ] && [ -s "${TFTP_ROOT}/${KERNEL_REL}" ] && [ -s "${TFTP_ROOT}/${INITRD_REL}" ]; then
+            cat <<EOF
+menuentry "Boot ${ISO_NAME} (live)" {
+    echo "Fetching kernel over TFTP (this can take a while)..."
+    linux /${KERNEL_REL} ${EXTRA_CMDLINE}
+    echo "Fetching initrd over TFTP..."
+    initrd /${INITRD_REL}
 }
 
+EOF
+        else
+            cat <<EOF
+# WARNING: kernel/initrd were not extracted from the ISO, so no live entry
+# could be generated. Check the earlier extraction warnings in setup output.
+
+EOF
+        fi
+        cat <<EOF
 menuentry "Boot from Local Disk" {
     set root=(hd0)
     chainloader +1
@@ -678,6 +672,8 @@ menuentry "Boot from Local Disk" {
 menuentry "Reboot" { reboot }
 menuentry "Shutdown" { halt }
 EOF
+    } > "${ISO_GRUB_CFG}"
+    echo "    UEFI menu written → ${ISO_GRUB_CFG}"
 fi
 
 # ─────────────────────────────────────────────
